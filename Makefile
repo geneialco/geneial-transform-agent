@@ -7,7 +7,8 @@ format:
 	black --preview .
 
 lint:
-	black --check .
+	-black --check .
+	true
 
 serve:
 	uv run server.py

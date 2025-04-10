@@ -1,5 +1,6 @@
 import logging
 from src.config import TEAM_MEMBER_CONFIGRATIONS, TEAM_MEMBERS
+from src.config.tracing import configure_langsmith_tracing
 from src.graph import build_graph
 
 # Configure logging
@@ -15,6 +16,9 @@ def enable_debug_logging():
 
 
 logger = logging.getLogger(__name__)
+
+# Configure LangSmith tracing
+configure_langsmith_tracing()
 
 # Create the graph
 graph = build_graph()
