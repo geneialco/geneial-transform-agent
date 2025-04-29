@@ -184,9 +184,7 @@ def coordinator_node(state: State) -> Command[Literal["planner", "__end__"]]:
     # 更新response.content为修复后的内容
     response.content = response_content
 
-    return Command(
-        goto=goto,
-    )
+    return Command(goto=goto, update={"messages": [response]})
 
 
 def reporter_node(state: State) -> Command[Literal["supervisor"]]:

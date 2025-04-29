@@ -24,14 +24,60 @@ Your task is to transform the input content in TOPMED format into the specified 
 Output Format: LINKML
 
 Instructions for LinkML format:
+- Create a linkml schema for the output and output it first after a line that says SCHEMA
+- After the schema output the output text after a line that says OUTPUT
 - Ensure the output follows LinkML schema conventions
 - Maintain proper YAML structure
+- The `imports:` section MUST be a YAML list of *scalar* CURIE or URI strings
+  (e.g.  `imports:\n  - linkml:types`). Never include a mapping such as
+  `{id: …, name: …}` under `imports`.
+- Declare namespace bindings in a top-level `prefixes:` section instead:
+    prefixes:
+      linkml: https://w3id.org/linkml/
+      xsd:    http://www.w3.org/2001/XMLSchema#
+    default_prefix: <base-IRI>
+- Includes a root class (tree_root: true) with a list of records
+- In the schema, any attribute that should hold a list **MUST** include both `inlined_as_list: true` **and** `multivalued: true` so the instance YAML can supply an array without validation errors.
+- When adding attributes to a class:
+  - List only the **slot names** under `slots`.  
+  - Define the slot’s properties in a top-level `slots:` section, or (if class-specific) under `slot_usage:`.  
+  - **Do NOT** embed a mapping inside `classes.<Class>.slots`.
+- In the schema defines all classes, enums, attributes, types, and ranges explicitly
+- In the schema you must generate a complete LinkML schema with the following required top-level metadata fields:
+  - id: A unique identifier URI or string for the schema
+  - name: A required short name for the schema that follows NCName rules (from XML standards used by LinkML):
+    - No spaces
+    - Cannot start with a number
+    - Cannot include colons
+    - Should be a simple identifier like TopmedData or topmed_data
+  - description: A brief description of what the schema represents
+- Includes permissible enum values for any categorical fields
+- Uses correct range references for enums (not enum:)
+- Always define enums using permissible_values (not values) and make sure the key and text are identical
+- Use a dictionary format, not a list
+- Quote enum values if they contain spaces or special characters
+- In the schema, use range: (not type:) for all attribute definitions in classes
+- Do not use permissible_values inside class attributes — only define them in the enums: section
+- All enums must be declared in the enums: section and referenced using range: in the class attributes
+- Enum definitions must use permissible_values: with dictionary format (not list format):
+- Ensure the instance YAML matches enum values exactly
 - Include all required fields and types
 - Use correct LinkML syntax for class definitions
 - Preserve relationships between entities
+- In enums:, use permissible_values with text: and description:, not value:
+- In the schema defines all classes, enums, attributes, types, and ranges explicitly.  
+   - **Enum rules** – for every `permissible_values` entry:  
+   - The *key* and its `text` **MUST be identical** (case-sensitive).  
+   - If you need a display label that differs from the key, omit the `text` field entirely or use annotations instead.  
+- With permissable_values be sure to match the possible values in the enum and the output exactly including any spacing and quotes
+- Reference each slot's range to the corresponding EnumName
+- Continue importing/linking xsd types so integer fields validate
 - Create a linkml schema for the output and output it first after a line that says SCHEMA
 - After the schema output the output text after a line that says OUTPUT
-- Do not include any other text before or after the SCHEMA or OUTPUT lines""",
+- Starts with a top-level key that matches the root class (e.g., records:)
+- Matches the data structure defined by the schema
+- Do not include any other text before or after the SCHEMA or OUTPUT lines
+- Ensure that the output can be copied as embedded YAML text""",
         "phenopackets-json": """
 Output Format: PHENOPACKETS (JSON)
 
@@ -79,10 +125,32 @@ def save_output_file(content: Any, file_path: str, output_format: str):
     """Save content to output file based on format and extension."""
     path = Path(file_path)
     with path.open("w", encoding="utf-8") as f:
+        # Handle JSON output - expects Python object, try parsing if string
         if output_format == "phenopackets-json" or path.suffix == ".json":
-            json.dump(content, f, indent=2)
+            try:
+                parsed_content = (
+                    json.loads(content) if isinstance(content, str) else content
+                )
+                json.dump(parsed_content, f, indent=2)
+            except json.JSONDecodeError:
+                logger.error(
+                    f"Failed to parse content as JSON for {file_path}, writing as string."
+                )
+                f.write(str(content))  # Fallback
+        # Handle LinkML/YAML - content from split_schema_and_output is already a formatted string
         elif output_format == "linkml" or path.suffix in [".yaml", ".yml"]:
-            yaml.safe_dump(content, f)
+            if isinstance(content, str):
+                f.write(content)  # Write the string directly
+                # Add a newline if the content doesn't end with one, for cleaner files
+                if not content.endswith("\n"):
+                    f.write("\n")
+            else:
+                # Fallback if content is not a string (unexpected)
+                logger.warning(
+                    f"Received non-string content for {output_format} format. Attempting yaml.safe_dump."
+                )
+                yaml.safe_dump(content, f)
+        # Handle CSV - already handles strings correctly
         elif output_format == "phenopackets-csv" or path.suffix == ".csv":
             if isinstance(content, str):
                 f.write(content)
@@ -112,63 +180,151 @@ def save_output_file(content: Any, file_path: str, output_format: str):
 def split_schema_and_output(result: Union[str, Dict, Any]) -> Tuple[str, str]:
     """Split the result into schema and output parts."""
     logger.info("Processing result of type: %s", type(result))
+    logger.info("=" * 80)
+    logger.info("RAW RESULT:")
+    logger.info(str(result))
+    logger.info("=" * 80)
 
-    # Handle dictionary with messages key
-    if isinstance(result, dict) and "messages" in result:
-        logger.info("Found messages in result dictionary")
-        # Look through all messages for schema and output
-        for i, msg in enumerate(result["messages"]):
-            logger.debug("Processing message %d: %s", i, type(msg))
-            if hasattr(msg, "content") and isinstance(msg.content, str):
-                content = msg.content
+    result_str = ""  # Initialize result_str
+
+    # --- REVISED HANDLING LOGIC ---
+
+    potential_content = []
+
+    # 1. If it's a dictionary, check all its values
+    if isinstance(result, dict):
+        logger.info("Result is a dictionary. Searching through its values for content.")
+        for key, value in result.items():
+            logger.debug(f"Checking dictionary key: '{key}', type: {type(value)}")
+            # --- REVISED: Handle lists by iterating items ---
+            if isinstance(value, list) or isinstance(value, tuple):
+                # If value is a list/tuple, process each item individually
                 logger.debug(
-                    "Message %d content (first 200 chars): %s", i, content[:200] + "..."
+                    f"Value for key '{key}' is a list/tuple. Processing items individually..."
                 )
+                for i, item in enumerate(value):
+                    item_part = None
+                    if isinstance(item, str):
+                        item_part = item
+                    elif hasattr(item, "content") and isinstance(
+                        getattr(item, "content"), str
+                    ):
+                        item_part = getattr(item, "content")
 
-                # If this message contains both SCHEMA and OUTPUT, use it
-                if "SCHEMA" in content and "OUTPUT" in content:
-                    logger.info(
-                        "Found message %d with both SCHEMA and OUTPUT markers", i
-                    )
-                    result_str = content
-                    break
-        else:
-            # If we didn't find both markers in any single message, combine all messages
-            logger.info("No single message had both markers - combining all messages")
-            result_str = "\n".join(
-                str(msg.content)
-                for msg in result["messages"]
-                if hasattr(msg, "content")
-            )
+                    if item_part:
+                        logger.info(
+                            f"Found potential content in list item {i} from key '{key}'"
+                        )
+                        potential_content.append(
+                            item_part
+                        )  # Add item content separately
+            # --- Handle strings ---
+            elif isinstance(value, str):
+                content_part = value
+                logger.info(
+                    f"Found potential string content in dictionary value associated with key '{key}'"
+                )
+                potential_content.append(content_part)
+            # --- Handle objects with .content ---
+            elif hasattr(value, "content") and isinstance(
+                getattr(value, "content"), str
+            ):
+                content_part = getattr(value, "content")
+                logger.info(
+                    f"Found potential content in object with .content attribute associated with key '{key}'"
+                )
+                potential_content.append(content_part)
+            # --- Other types are ignored in this loop (handled by fallback later if needed) ---
+
+    # 2. If it's a list or tuple directly (outside a dict)
+    elif isinstance(result, (list, tuple)):
+        logger.info("Result is a list/tuple directly. Processing items.")
+        for i, item in enumerate(result):
+            content_part = None
+            if isinstance(item, str):
+                content_part = item
+            elif hasattr(item, "content") and isinstance(getattr(item, "content"), str):
+                content_part = getattr(item, "content")
+            if content_part:
+                # logger.debug(f"Content part from list item {i}:\n{content_part}")
+                potential_content.append(content_part)
+
+    # 3. If it has a .content attribute directly
+    elif hasattr(result, "content") and isinstance(getattr(result, "content"), str):
+        logger.info("Result has a direct .content attribute.")
+        content_part = getattr(result, "content")
+        potential_content.append(content_part)
+        # logger.debug(f"Content part:\n{content_part}")
+
+    # 4. If it's just a string
+    elif isinstance(result, str):
+        logger.info("Result is a raw string.")
+        potential_content.append(result)
+        # logger.debug(f"Content part:\n{result}")
+
+    # 5. Fallback: Convert to string
     else:
-        # Handle other types as before
-        if isinstance(result, (list, tuple)):
-            messages_content = []
-            logger.info("Processing list of %d messages", len(result))
-            for i, msg in enumerate(result):
-                logger.debug("Processing list item %d: %s", i, type(msg))
-                if hasattr(msg, "content"):
-                    messages_content.append(str(msg.content))
-                elif isinstance(msg, dict) and "content" in msg:
-                    messages_content.append(str(msg["content"]))
-                elif isinstance(msg, str):
-                    messages_content.append(msg)
-                else:
-                    messages_content.append(str(msg))
-            result_str = "\n".join(messages_content)
-        elif hasattr(result, "content"):
-            logger.info("Processing single message with content attribute")
-            result_str = str(result.content)
-        elif isinstance(result, str):
-            logger.info("Processing raw string result")
-            result_str = result
-        else:
-            logger.info("Processing unknown type, converting to string")
-            result_str = str(result)
+        logger.warning(
+            "Result type %s not directly handled for content extraction. Converting to string.",
+            type(result),
+        )
+        potential_content.append(str(result))
 
-    logger.debug(
-        "Final combined content (first 200 chars):\n%s", result_str[:200] + "..."
-    )
+    # Combine all found potential content
+    # --- REVISED: Prioritize content with markers ---
+    prioritized_content = None
+    if not potential_content:
+        logger.error(
+            "Could not extract any potential string content from the workflow result."
+        )
+        result_str = ""  # Ensure result_str is empty
+    else:
+        logger.info(
+            f"Found {len(potential_content)} potential content part(s). Searching for the one containing SCHEMA and OUTPUT."
+        )
+        for i, part in enumerate(potential_content):
+            # Check if this part contains both markers (case-sensitive)
+            # --- REVISED CHECK: Look for a more specific pattern ---
+            schema_marker_pattern = (
+                "SCHEMA"  # Expect this potentially at start or after newline
+            )
+            output_marker_pattern = (
+                "\nOUTPUT"  # Expect OUTPUT likely preceded by newline
+            )
+
+            schema_pos = part.find(schema_marker_pattern)
+            # Search for output marker *after* the schema marker position
+            output_pos = -1
+            if schema_pos != -1:
+                output_pos = part.find(output_marker_pattern, schema_pos)
+
+            # if "SCHEMA" in part and "OUTPUT" in part: # Old, too simple check
+            if (
+                schema_pos != -1 and output_pos != -1
+            ):  # Check if both found, and output is after schema
+                logger.info(
+                    f"Prioritizing content part {i} as it contains distinct SCHEMA and OUTPUT markers in sequence."
+                )
+                prioritized_content = part
+                break  # Use the first part found that contains both in sequence
+
+        if prioritized_content:
+            result_str = prioritized_content
+        else:
+            # Fallback: If no single part has both markers, combine everything as before (might indicate an issue)
+            logger.warning(
+                "No single content part contained both SCHEMA and OUTPUT. Combining all parts as fallback."
+            )
+            result_str = "\n\n".join(
+                potential_content
+            )  # Join with double newline for separation
+
+    # --- END REVISED ---
+
+    logger.info("=" * 80)
+    logger.info("FINAL CONTENT TO PARSE (BEFORE CLEANING/SPLITTING):")
+    logger.info(result_str)
+    logger.info("=" * 80)
 
     # Remove any wrapping backticks and language identifiers
     lines = result_str.split("\n")
@@ -183,35 +339,72 @@ def split_schema_and_output(result: Union[str, Dict, Any]) -> Tuple[str, str]:
         cleaned_lines.append(line)
 
     result_str = "\n".join(cleaned_lines)
-    logger.debug("Cleaned content (first 200 chars):\n%s", result_str[:200] + "...")
+    logger.info("AFTER CLEANING CODE BLOCKS:")
+    logger.info(result_str)
+    logger.info("=" * 80)
 
-    # Split the result into parts
-    parts = result_str.split("\n")
-    schema = []
-    output = []
-    current_section = None
+    # --- MODIFIED SPLITTING LOGIC ---
+    schema_content = ""
+    output_content = ""
 
-    logger.info("Splitting content into sections")
-    logger.debug("Total lines to process: %d", len(parts))
+    schema_marker = "SCHEMA"
+    output_marker = "OUTPUT"
 
-    # Look for SCHEMA and OUTPUT markers
-    for i, line in enumerate(parts):
-        stripped_line = line.strip()
-        if stripped_line == "SCHEMA":
-            current_section = "schema"
-            schema = []  # Reset schema when we find a new SCHEMA marker
-            logger.info("Found SCHEMA marker at line %d", i + 1)
-        elif stripped_line == "OUTPUT":
-            current_section = "output"
-            output = []  # Reset output when we find a new OUTPUT marker
-            logger.info("Found OUTPUT marker at line %d", i + 1)
-        elif current_section == "schema" and stripped_line != "SCHEMA":
-            schema.append(line)
-        elif current_section == "output" and stripped_line != "OUTPUT":
-            output.append(line)
+    logger.info("Searching for SCHEMA and OUTPUT markers using string find...")
 
-    schema_content = "\n".join(schema).strip()
-    output_content = "\n".join(output).strip()
+    schema_start_index = result_str.find(schema_marker)
+    output_start_index = result_str.find(output_marker)
+
+    logger.info(f"SCHEMA marker found at index: {schema_start_index}")
+    logger.info(f"OUTPUT marker found at index: {output_start_index}")
+
+    if schema_start_index != -1 and output_start_index != -1:
+        # Found both markers
+        logger.info("Both markers found.")
+        # Schema content starts after the SCHEMA marker + space/newline
+        schema_content_start = schema_start_index + len(schema_marker)
+        # Schema content ends just before the OUTPUT marker
+        schema_content_end = output_start_index
+        schema_content = result_str[schema_content_start:schema_content_end].strip()
+
+        # Output content starts after the OUTPUT marker + space/newline
+        output_content_start = output_start_index + len(output_marker)
+        output_content = result_str[output_content_start:].strip()
+
+        logger.info("Successfully extracted schema and output based on markers.")
+
+    elif schema_start_index != -1:
+        # Found only SCHEMA marker
+        logger.warning(
+            "Only SCHEMA marker found. Extracting schema content, output will be empty."
+        )
+        schema_content_start = schema_start_index + len(schema_marker)
+        schema_content = result_str[schema_content_start:].strip()
+        output_content = ""  # Explicitly set output to empty
+
+    elif output_start_index != -1:
+        # Found only OUTPUT marker (unlikely given prompt, but handle anyway)
+        logger.warning("Only OUTPUT marker found. Schema will be empty.")
+        output_content_start = output_start_index + len(output_marker)
+        output_content = result_str[output_content_start:].strip()
+        schema_content = ""  # Explicitly set schema to empty
+
+    else:
+        # Found neither marker
+        logger.error("Neither SCHEMA nor OUTPUT marker found in the cleaned string.")
+        # Keep both empty, error will be raised later
+        schema_content = ""
+        output_content = ""
+
+    # --- END MODIFIED SPLITTING LOGIC ---
+
+    logger.info("=" * 80)
+    logger.info("FINAL SCHEMA CONTENT:")
+    logger.info(schema_content if schema_content else "[EMPTY]")
+    logger.info("=" * 80)
+    logger.info("FINAL OUTPUT CONTENT:")
+    logger.info(output_content if output_content else "[EMPTY]")
+    logger.info("=" * 80)
 
     logger.info("Final schema section length: %d characters", len(schema_content))
     logger.info("Final output section length: %d characters", len(output_content))
@@ -265,6 +458,14 @@ def process_file(
             logger.info("Workflow completed, processing result")
 
             # Log the raw result for debugging
+            logger.info("=" * 80)
+            logger.info(
+                "RAW OUTPUT FROM run_agent_workflow (BEFORE split_schema_and_output):"
+            )
+            logger.info(f"Type: {type(result)}")
+            logger.info(f"Content:\n{str(result)}")
+            logger.info("=" * 80)
+
             logger.info("Raw result type: %s", type(result))
             logger.debug(
                 "Raw result content:\n%s",
