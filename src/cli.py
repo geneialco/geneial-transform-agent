@@ -3,6 +3,8 @@ import json
 import yaml
 import time
 import logging
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Literal, Tuple, Union
 from .workflow import run_agent_workflow
@@ -40,8 +42,9 @@ Instructions for LinkML format:
 - In the schema, any attribute that should hold a list **MUST** include both `inlined_as_list: true` **and** `multivalued: true` so the instance YAML can supply an array without validation errors.
 - When adding attributes to a class:
   - List only the **slot names** under `slots`.  
-  - Define the slot’s properties in a top-level `slots:` section, or (if class-specific) under `slot_usage:`.  
+  - Define the slot's properties in a top-level `slots:` section, or (if class-specific) under `slot_usage:`.  
   - **Do NOT** embed a mapping inside `classes.<Class>.slots`.
+- Place slot_usage: only inside the class where the overrides apply. Never put a slot_usage: mapping at the top level or keyed by the class name.
 - In the schema defines all classes, enums, attributes, types, and ranges explicitly
 - In the schema you must generate a complete LinkML schema with the following required top-level metadata fields:
   - id: A unique identifier URI or string for the schema
@@ -64,6 +67,8 @@ Instructions for LinkML format:
 - Include all required fields and types
 - Use correct LinkML syntax for class definitions
 - Preserve relationships between entities
+- Under every classes.<Class>.slots key, express the slot names as a proper YAML list using leading hyphens (- age, - gender, etc.); never combine them into one line or mapping.
+- Create a separate root collection class (e.g., RecordCollection) marked tree_root: true that contains one multivalued, inlined_as_list: true slot (e.g., records) whose range is the record class, so the instance YAML can legitimately start with that slot.
 - In enums:, use permissible_values with text: and description:, not value:
 - In the schema defines all classes, enums, attributes, types, and ranges explicitly.  
    - **Enum rules** – for every `permissible_values` entry:  
@@ -429,13 +434,15 @@ def process_file(
     user_prompt: str,
     output_format: str,
     debug: bool = False,
+    validate: bool = False,
 ) -> None:
     """Process input file using the workflow and save results."""
     if debug:
         logger.setLevel(logging.DEBUG)
 
-    max_retries = 3
-    retry_delay = 2  # seconds between retries
+    # --- Initial Generation Attempt --- (Using existing retry logic)
+    max_initial_retries = 3
+    initial_retry_delay = 2  # seconds between retries
 
     # Load input content
     input_content = load_input_file(input_path)
@@ -445,16 +452,26 @@ def process_file(
     system_prompt = get_system_prompt(output_format)
 
     # Combine system prompt with user prompt and input content
-    full_prompt = f"{system_prompt}\n\n{user_prompt}\n\n{input_content}"
-    logger.debug("Full prompt:\n%s", full_prompt)
+    initial_full_prompt = f"{system_prompt}\n\n{user_prompt}\n\n{input_content}"
+    current_prompt = (
+        initial_full_prompt  # Use a separate var for potential modifications
+    )
+    logger.debug("Initial Full prompt:\n%s", current_prompt)
 
-    last_error = None
-    for attempt in range(max_retries):
+    last_initial_error = None
+    schema_content = ""
+    output_content = ""
+
+    for attempt in range(max_initial_retries):
         try:
-            logger.info("Starting attempt %d of %d", attempt + 1, max_retries)
+            logger.info(
+                "Starting initial generation attempt %d of %d",
+                attempt + 1,
+                max_initial_retries,
+            )
 
             # Run the workflow
-            result = run_agent_workflow(full_prompt, debug=debug)
+            result = run_agent_workflow(current_prompt, debug=debug)
             logger.info("Workflow completed, processing result")
 
             # Log the raw result for debugging
@@ -505,45 +522,263 @@ def process_file(
             if not output_content:
                 raise ValueError("No output was generated in the response")
 
-            # Try parsing the schema content if it exists
+            # Try parsing the schema content if it exists and is linkml/yaml
+            if schema_content and output_format == "linkml":
+                try:
+                    yaml.safe_load(schema_content)  # Validate YAML syntax
+                    logger.info("Successfully syntax-checked YAML schema")
+                except yaml.YAMLError as e:
+                    raise ValueError(f"Generated schema is not valid YAML: {e}")
+            elif schema_content and output_format == "phenopackets-json":
+                try:
+                    json.loads(schema_content)  # Validate JSON syntax
+                    logger.info("Successfully syntax-checked JSON schema")
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Generated schema is not valid JSON: {e}")
+
+            # Save the potentially valid schema (if exists)
             if schema_content:
-                if output_format == "phenopackets-json":
-                    json.loads(schema_content)  # Validate JSON
-                    logger.info("Successfully validated JSON schema")
-                elif output_format == "linkml":
-                    yaml.safe_load(schema_content)  # Validate YAML
-                    logger.info("Successfully validated YAML schema")
-                # Save the schema if it exists and is valid
                 save_output_file(schema_content, schema_path, output_format)
                 logger.info("Saved schema to: %s", schema_path)
             else:
                 logger.warning(
                     "No schema was generated, but continuing since output exists"
                 )
-                # Write an empty file for schema to maintain consistent behavior
-                Path(schema_path).touch()
+                Path(schema_path).touch()  # Create empty file if no schema
 
-            # Save the output content
+            # Save the output content (parsing/validation depends on format/validation step)
             save_output_file(output_content, output_path, output_format)
             logger.info("Saved output to: %s", output_path)
 
-            # If successful, print attempt number if not first try
-            if attempt > 0:
-                logger.info("Succeeded on attempt %d", attempt + 1)
-            return
+            # If we got here, initial generation was successful enough to proceed
+            logger.info("Initial generation successful (attempt %d)", attempt + 1)
+            break  # Exit the initial generation retry loop
 
         except (ValueError, json.JSONDecodeError, yaml.YAMLError) as e:
-            last_error = str(e)
-            logger.error("Attempt %d failed: %s", attempt + 1, str(e))
-            if attempt < max_retries - 1:  # Don't sleep on last attempt
-                logger.info("Retrying in %d seconds...", retry_delay)
-                time.sleep(retry_delay)
+            last_initial_error = str(e)
+            logger.error(
+                "Initial generation attempt %d failed: %s", attempt + 1, str(e)
+            )
+            if attempt < max_initial_retries - 1:  # Don't sleep on last attempt
+                logger.info(
+                    "Retrying initial generation in %d seconds...", initial_retry_delay
+                )
+                time.sleep(initial_retry_delay)
                 # Add a note to the prompt about the error for next attempt
-                full_prompt = f"{full_prompt}\n\nNote: Previous attempt failed because: {str(e)}. Please ensure to include an OUTPUT section with valid formatting."
+                current_prompt = f"{initial_full_prompt}\n\nNote: Previous attempt failed because: {str(e)}. Please ensure to include both SCHEMA and OUTPUT sections with valid formatting as requested."
+            else:
+                # If all initial retries failed
+                logger.error(
+                    "All initial generation attempts failed. Last error: %s",
+                    last_initial_error,
+                )
+                raise ValueError(
+                    f"Failed initial generation after {max_initial_retries} attempts. Last error: {last_initial_error}"
+                )
 
-    # If we get here, all retries failed
-    logger.error("All attempts failed. Last error: %s", last_error)
-    raise ValueError(f"Failed after {max_retries} attempts. Last error: {last_error}")
+    # --- Validation and Correction Loop (if requested) ---
+    if validate and output_format == "linkml":
+        max_validation_retries = 10
+        validation_retry_delay = 2  # seconds
+        validation_successful = False
+        successful_val_attempt_count = 0  # To store the attempt number on success
+
+        for val_attempt in range(max_validation_retries):
+            logger.info(
+                "Starting validation attempt %d of %d for LinkML.",
+                val_attempt + 1,
+                max_validation_retries,
+            )
+
+            if not Path(schema_path).exists() or Path(schema_path).stat().st_size == 0:
+                logger.error(
+                    "Validation failed: Schema file '%s' is missing or empty.",
+                    schema_path,
+                )
+                # Treat this as a validation failure, maybe prompt LLM to generate it?
+                # For now, we break the validation loop if schema is missing after generation
+                # Could potentially add logic here to prompt for schema generation specifically.
+                validation_successful = False
+                break  # Exit validation loop
+
+            # 1. Extract Target Class from Schema
+            target_class = None
+            try:
+                with open(schema_path, "r", encoding="utf-8") as f:
+                    schema_file_content = f.read()
+                # Regex to find the first class name after 'classes:'
+                # Looks for 'classes:', optional whitespace/newline, then captures the word before ':'
+                match = re.search(
+                    r"^classes:\s*\n(?:\s*#.*\n)*\s*(\w+):",
+                    schema_file_content,
+                    re.MULTILINE,
+                )
+                if match:
+                    target_class = match.group(1)
+                    logger.info(f"Extracted target class: {target_class}")
+                else:
+                    logger.error(
+                        "Could not find 'classes:' section or target class in schema file: %s",
+                        schema_path,
+                    )
+                    # This is a validation failure, maybe prompt LLM to fix schema structure?
+                    # Break validation loop for now.
+                    validation_successful = False
+                    break
+            except Exception as e:
+                logger.error(
+                    f"Error reading schema or extracting target class from {schema_path}: {e}"
+                )
+                validation_successful = False
+                break  # Exit validation loop
+
+            # 2. Run linkml-validate command
+            validation_cmd = [
+                "linkml-validate",
+                "--schema",
+                str(schema_path),
+                "--target-class",
+                target_class,
+                str(output_path),
+            ]
+            logger.info(f"Running validation command: {' '.join(validation_cmd)}")
+
+            try:
+                process = subprocess.run(
+                    validation_cmd, capture_output=True, text=True, check=False
+                )  # check=False to handle errors manually
+                stdout = process.stdout.strip()
+                stderr = process.stderr.strip()
+                logger.debug(f"linkml-validate stdout:\n{stdout}")
+                logger.debug(f"linkml-validate stderr:\n{stderr}")
+
+                # 3. Check validation result
+                # linkml-validate exits 0 on success and prints "No issues found" to stdout
+                # It exits non-zero on failure and prints errors to stderr
+                if process.returncode == 0 and "No issues found" in stdout:
+                    logger.info("Validation successful! No issues found.")
+                    validation_successful = True
+                    successful_val_attempt_count = (
+                        val_attempt + 1
+                    )  # Record successful attempt number
+                    break  # Exit validation loop
+                else:
+                    # Validation failed
+                    error_message = (
+                        stderr if stderr else stdout
+                    )  # Prefer stderr for errors
+                    logger.error(
+                        f"Validation attempt {val_attempt + 1} failed. Error:\n{error_message}"
+                    )
+
+                    if val_attempt < max_validation_retries - 1:
+                        logger.info("Attempting to fix using LLM...")
+                        # Construct prompt for LLM to fix the issue
+                        fix_prompt = (
+                            f"{initial_full_prompt}\n\n"
+                            f"--- PREVIOUSLY GENERATED SCHEMA ---\n{schema_content}\n"
+                            f"--- PREVIOUSLY GENERATED OUTPUT ---\n{output_content}\n\n"
+                            f"--- VALIDATION ERROR ---\n{error_message}\n\n"
+                            f"--- INSTRUCTION ---\n"
+                            f"The previous generation resulted in the validation error above. "
+                            f"Please analyze the schema, output, and the error message. "
+                            f"Fix the issues in the schema and/or output according to the LinkML rules and the error. "
+                            f"Provide the corrected full schema content after a 'SCHEMA' line and the corrected full output content after an 'OUTPUT' line."
+                        )
+                        logger.debug("LLM Fix Prompt:\n%s", fix_prompt)
+
+                        # Call LLM again
+                        try:
+                            result = run_agent_workflow(fix_prompt, debug=debug)
+                            logger.info("Correction attempt workflow completed.")
+
+                            # Re-split and save
+                            new_schema_content, new_output_content = (
+                                split_schema_and_output(result)
+                            )
+
+                            if not new_output_content:
+                                logger.warning(
+                                    f"Correction attempt {val_attempt + 1} did not produce output content. Retrying validation with previous files."
+                                )
+                                # Keep old content, validation will likely fail again, but prevents erroring out here
+                            else:
+                                # Basic check for schema validity before saving
+                                if new_schema_content:
+                                    try:
+                                        yaml.safe_load(new_schema_content)
+                                        schema_content = (
+                                            new_schema_content  # Update schema content
+                                        )
+                                        save_output_file(
+                                            schema_content, schema_path, output_format
+                                        )
+                                        logger.info(
+                                            f"Saved corrected schema to: {schema_path}"
+                                        )
+                                    except yaml.YAMLError as e:
+                                        logger.warning(
+                                            f"LLM correction produced invalid YAML schema: {e}. Keeping previous schema."
+                                        )
+                                        # Keep old schema content
+                                else:
+                                    logger.warning(
+                                        "LLM correction did not produce schema content. Keeping previous schema."
+                                    )
+                                    # Keep old schema content if LLM didn't provide one
+
+                                output_content = (
+                                    new_output_content  # Update output content
+                                )
+                                save_output_file(
+                                    output_content, output_path, output_format
+                                )
+                                logger.info(f"Saved corrected output to: {output_path}")
+
+                        except Exception as llm_e:
+                            logger.error(
+                                f"LLM Correction attempt {val_attempt + 1} failed during workflow: {llm_e}"
+                            )
+                            # Continue to next validation attempt with old files
+
+                        logger.info(
+                            f"Retrying validation in {validation_retry_delay} seconds..."
+                        )
+                        time.sleep(validation_retry_delay)
+                    else:
+                        # Max validation retries reached
+                        logger.error(
+                            "Validation failed after %d attempts.",
+                            max_validation_retries,
+                        )
+                        validation_successful = False
+                        # Keep loop going so it exits naturally and raises error below
+
+            except FileNotFoundError:
+                logger.error(
+                    f"Validation failed: 'linkml-validate' command not found. Make sure LinkML is installed and in the system PATH."
+                )
+                validation_successful = False
+                break  # Cannot proceed without the command
+            except Exception as val_e:
+                logger.error(f"An unexpected error occurred during validation: {val_e}")
+                validation_successful = False
+                break  # Exit validation loop on unexpected error
+
+        # After validation loop: check final status
+        if not validation_successful:
+            raise ValueError(
+                f"LinkML validation failed after {max_validation_retries} attempts. Check logs for details."
+            )
+        else:
+            logger.info(
+                f"LinkML validation completed successfully after {successful_val_attempt_count} attempt(s)."
+            )
+
+    # --- End of Validation --- (or if validation wasn't requested) ---
+    # If we reach here, either validation was not requested, not applicable, or succeeded.
+    logger.info("Processing finished successfully.")
+    # Return is implicit (None)
 
 
 def main():
@@ -565,13 +800,18 @@ def main():
         "--max-retries",
         type=int,
         default=3,
-        help="Maximum number of retry attempts (default: 3)",
+        help="Maximum number of retry attempts for initial generation (default: 3)",
     )
     parser.add_argument(
         "--retry-delay",
         type=int,
         default=2,
-        help="Delay between retries in seconds (default: 2)",
+        help="Delay between initial generation retries in seconds (default: 2)",
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run validation on the generated output (currently only LinkML supported)",
     )
 
     args = parser.parse_args()
@@ -584,7 +824,13 @@ def main():
 
     try:
         process_file(
-            args.input, args.output, args.schema, user_prompt, args.format, args.debug
+            args.input,
+            args.output,
+            args.schema,
+            user_prompt,
+            args.format,
+            args.debug,
+            args.validate,
         )
         print(f"Successfully processed {args.input}")
         print(f"Schema saved to: {args.schema}")
