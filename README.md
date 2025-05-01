@@ -46,7 +46,7 @@ The main script is `src/cli.py`. You run it as a module from the root directory 
 -   `--validate`: (Optional) If included, runs a validation step *after* generating the output. Currently only supported for `--format linkml`. Requires `linkml-validate` to be installed and in the PATH.
 -   `--prompt`: (Optional) Additional text to append to the system prompt given to the AI agent.
 -   `--debug`: (Optional) Enables detailed debug logging.
--   `--max-retries`: (Optional, Default: 3) Maximum retries for the initial AI generation attempt.
+-   `--max-retries`: (Optional, Default: 10) Maximum retries for the initial AI generation attempt.
 -   `--retry-delay`: (Optional, Default: 2) Delay in seconds between initial generation retries.
 
 ### Example: Transforming to LinkML with Validation

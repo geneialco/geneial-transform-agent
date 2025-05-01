@@ -435,13 +435,14 @@ def process_file(
     output_format: str,
     debug: bool = False,
     validate: bool = False,
+    max_retries: int = 10,
 ) -> None:
     """Process input file using the workflow and save results."""
     if debug:
         logger.setLevel(logging.DEBUG)
 
-    # --- Initial Generation Attempt --- (Using existing retry logic)
-    max_initial_retries = 3
+    # --- Initial Generation Attempt ---
+    # Use max_retries for initial loop as well
     initial_retry_delay = 2  # seconds between retries
 
     # Load input content
@@ -462,12 +463,12 @@ def process_file(
     schema_content = ""
     output_content = ""
 
-    for attempt in range(max_initial_retries):
+    for attempt in range(max_retries):
         try:
             logger.info(
                 "Starting initial generation attempt %d of %d",
                 attempt + 1,
-                max_initial_retries,
+                max_retries,
             )
 
             # Run the workflow
@@ -559,7 +560,7 @@ def process_file(
             logger.error(
                 "Initial generation attempt %d failed: %s", attempt + 1, str(e)
             )
-            if attempt < max_initial_retries - 1:  # Don't sleep on last attempt
+            if attempt < max_retries - 1:  # Don't sleep on last attempt
                 logger.info(
                     "Retrying initial generation in %d seconds...", initial_retry_delay
                 )
@@ -573,21 +574,21 @@ def process_file(
                     last_initial_error,
                 )
                 raise ValueError(
-                    f"Failed initial generation after {max_initial_retries} attempts. Last error: {last_initial_error}"
+                    f"Failed initial generation after {max_retries} attempts. Last error: {last_initial_error}"
                 )
 
     # --- Validation and Correction Loop (if requested) ---
     if validate and output_format == "linkml":
-        max_validation_retries = 10
+        # Remove hardcoded value, use max_retries from args
         validation_retry_delay = 2  # seconds
         validation_successful = False
         successful_val_attempt_count = 0  # To store the attempt number on success
 
-        for val_attempt in range(max_validation_retries):
+        for val_attempt in range(max_retries):  # Use max_retries here
             logger.info(
                 "Starting validation attempt %d of %d for LinkML.",
                 val_attempt + 1,
-                max_validation_retries,
+                max_retries,  # Use max_retries here
             )
 
             if not Path(schema_path).exists() or Path(schema_path).stat().st_size == 0:
@@ -671,7 +672,7 @@ def process_file(
                         f"Validation attempt {val_attempt + 1} failed. Error:\n{error_message}"
                     )
 
-                    if val_attempt < max_validation_retries - 1:
+                    if val_attempt < max_retries - 1:
                         logger.info("Attempting to fix using LLM...")
                         # Construct prompt for LLM to fix the issue
                         fix_prompt = (
@@ -749,7 +750,7 @@ def process_file(
                         # Max validation retries reached
                         logger.error(
                             "Validation failed after %d attempts.",
-                            max_validation_retries,
+                            max_retries,  # Use max_retries here
                         )
                         validation_successful = False
                         # Keep loop going so it exits naturally and raises error below
@@ -768,7 +769,7 @@ def process_file(
         # After validation loop: check final status
         if not validation_successful:
             raise ValueError(
-                f"LinkML validation failed after {max_validation_retries} attempts. Check logs for details."
+                f"LinkML validation failed after {max_retries} attempts. Check logs for details."  # Use max_retries here
             )
         else:
             logger.info(
@@ -799,8 +800,8 @@ def main():
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=3,
-        help="Maximum number of retry attempts for initial generation (default: 3)",
+        default=10,
+        help="Maximum number of retry attempts for initial generation and validation (default: 10)",
     )
     parser.add_argument(
         "--retry-delay",
@@ -831,6 +832,7 @@ def main():
             args.format,
             args.debug,
             args.validate,
+            args.max_retries,
         )
         print(f"Successfully processed {args.input}")
         print(f"Schema saved to: {args.schema}")
