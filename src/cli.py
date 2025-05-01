@@ -25,64 +25,77 @@ Your task is to transform the input content in TOPMED format into the specified 
         "linkml": """
 Output Format: LINKML
 
-Instructions for LinkML format:
-- Create a linkml schema for the output and output it first after a line that says SCHEMA
-- After the schema output the output text after a line that says OUTPUT
-- Ensure the output follows LinkML schema conventions
-- Maintain proper YAML structure
-- The `imports:` section MUST be a YAML list of *scalar* CURIE or URI strings
-  (e.g.  `imports:\n  - linkml:types`). Never include a mapping such as
-  `{id: …, name: …}` under `imports`.
-- Declare namespace bindings in a top-level `prefixes:` section instead:
-    prefixes:
-      linkml: https://w3id.org/linkml/
-      xsd:    http://www.w3.org/2001/XMLSchema#
-    default_prefix: <base-IRI>
-- Includes a root class (tree_root: true) with a list of records
-- In the schema, any attribute that should hold a list **MUST** include both `inlined_as_list: true` **and** `multivalued: true` so the instance YAML can supply an array without validation errors.
-- When adding attributes to a class:
-  - List only the **slot names** under `slots`.  
-  - Define the slot's properties in a top-level `slots:` section, or (if class-specific) under `slot_usage:`.  
-  - **Do NOT** embed a mapping inside `classes.<Class>.slots`.
-- Place slot_usage: only inside the class where the overrides apply. Never put a slot_usage: mapping at the top level or keyed by the class name.
-- In the schema defines all classes, enums, attributes, types, and ranges explicitly
-- In the schema you must generate a complete LinkML schema with the following required top-level metadata fields:
-  - id: A unique identifier URI or string for the schema
-  - name: A required short name for the schema that follows NCName rules (from XML standards used by LinkML):
-    - No spaces
-    - Cannot start with a number
-    - Cannot include colons
-    - Should be a simple identifier like TopmedData or topmed_data
-  - description: A brief description of what the schema represents
-- Includes permissible enum values for any categorical fields
-- Uses correct range references for enums (not enum:)
-- Always define enums using permissible_values (not values) and make sure the key and text are identical
-- Use a dictionary format, not a list
-- Quote enum values if they contain spaces or special characters
-- In the schema, use range: (not type:) for all attribute definitions in classes
-- Do not use permissible_values inside class attributes — only define them in the enums: section
-- All enums must be declared in the enums: section and referenced using range: in the class attributes
-- Enum definitions must use permissible_values: with dictionary format (not list format):
-- Ensure the instance YAML matches enum values exactly
-- Include all required fields and types
-- Use correct LinkML syntax for class definitions
-- Preserve relationships between entities
-- Under every classes.<Class>.slots key, express the slot names as a proper YAML list using leading hyphens (- age, - gender, etc.); never combine them into one line or mapping.
-- Create a separate root collection class (e.g., RecordCollection) marked tree_root: true that contains one multivalued, inlined_as_list: true slot (e.g., records) whose range is the record class, so the instance YAML can legitimately start with that slot.
-- In enums:, use permissible_values with text: and description:, not value:
-- In the schema defines all classes, enums, attributes, types, and ranges explicitly.  
-   - **Enum rules** – for every `permissible_values` entry:  
-   - The *key* and its `text` **MUST be identical** (case-sensitive).  
-   - If you need a display label that differs from the key, omit the `text` field entirely or use annotations instead.  
-- With permissable_values be sure to match the possible values in the enum and the output exactly including any spacing and quotes
-- Reference each slot's range to the corresponding EnumName
-- Continue importing/linking xsd types so integer fields validate
-- Create a linkml schema for the output and output it first after a line that says SCHEMA
-- After the schema output the output text after a line that says OUTPUT
-- Starts with a top-level key that matches the root class (e.g., records:)
-- Matches the data structure defined by the schema
-- Do not include any other text before or after the SCHEMA or OUTPUT lines
-- Ensure that the output can be copied as embedded YAML text""",
+####################################################
+##  SECTION A – HOW TO EMIT THE RESULT
+####################################################
+1. Emit **exactly two** top-level blocks, in this order­­:
+   • A line `SCHEMA` followed by the complete LinkML schema  
+   • A line `OUTPUT` followed by the instance YAML  
+   No other prose may appear before, between, or after those blocks.
+
+####################################################
+##  SECTION B – SCHEMA RULES
+####################################################
+# ──  Metadata ────────────────────────────────────
+2. Provide required keys **id**, **name**, **description**.  
+   • `name` must be a valid NCName (no spaces, no leading digit, no colon).
+
+3. `prefixes:` **must** include  
+   linkml: https://w3id.org/linkml/  
+   xsd:    http://www.w3.org/2001/XMLSchema#  
+   default_prefix: <base-IRI>
+
+4. `imports:` is a YAML list; include only  
+   - linkml:types  
+   Never use mappings inside `imports:`.
+
+# ──  Root design ─────────────────────────────────
+5. Create a collection class (e.g., **RecordCollection**) with `tree_root: true`.  
+   • It owns one slot (e.g., **records**) that is `multivalued: true` and `inlined_as_list: true`, with `range: Record`.  
+   • In the instance YAML, start with that slot key (`records:`).
+
+# ──  Classes & slots ─────────────────────────────
+6. Under `classes.<Class>.slots`, list **only slot names** (YAML list, each prefixed with “- ”).  
+7. Define every slot in either  
+   • the top-level **slots:** block, **or**  
+   • the owning class’s **slot_usage:** block.  
+8. For list-valued attributes, always include both `multivalued: true` *and* `inlined_as_list: true`.  
+9. Use `range:` (never `type:`) for attribute typing. Primitives reference `xsd:` literals.
+
+# ──  Enumerations ────────────────────────────────
+10. Declare all enums under `enums:` using dictionary form with `permissible_values:`.  
+    • The **key** and its `text` must be identical (case-sensitive).  
+    • Quote keys containing spaces or special characters.  
+    • Reference enums in slots via `range: <EnumName>`.  
+    • Never embed `permissible_values` inside a class attribute.
+
+# ──  Validation guard-rails ─────────────────────
+11. **Missing-slot safeguard** — *Every slot listed under any `classes.<Class>.slots` MUST have a matching definition.*  
+    Correct pattern (copyable example):  
+    ```yaml
+    classes:
+      Person:
+        slots:
+          - given_name        # ← slot reference
+
+    slots:
+      given_name:             # ← matching definition
+        range: xsd:string
+    ```
+12. **Self-check directive** — After constructing `classes:` and their slot lists, iterate over **all** referenced slots (including primitives like `age`, `height`, etc.).  
+    • **If even one slot lacks a definition, do NOT output the schema; regenerate instead until the check passes.**
+
+# ──  YAML style ─────────────────────────────────
+13. Use 2-space indentation throughout; never use TABs.
+
+####################################################
+##  SECTION C – INSTANCE YAML RULES
+####################################################
+14. Instance YAML must conform exactly to the schema (correct keys, ranges, enum spellings).  
+15. Begin with the collection slot key (`records:`).  
+16. Ensure the YAML can be pasted directly—no Markdown fencing or extra prose.
+
+""",
         "phenopackets-json": """
 Output Format: PHENOPACKETS (JSON)
 
