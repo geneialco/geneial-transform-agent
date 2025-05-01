@@ -1,0 +1,14 @@
+- age: 35
+  education_level: "Bachelor's"
+  gender: Female
+  height: 152
+  id: 21
+  income: 52000
+  marital_status: Single
+- age: 19
+  education_level: "High School"
+  gender: Male
+  height: 175
+  id: 22
+  income: 32000
+  marital_status: Single

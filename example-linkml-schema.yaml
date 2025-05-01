@@ -1,0 +1,60 @@
+id: https://example.org/topmed_data
+name: TopmedData
+description: A schema representing demographic and educational data.
+prefixes:
+  linkml: https://w3id.org/linkml/
+  xsd: http://www.w3.org/2001/XMLSchema#
+default_prefix: topmed_data
+imports:
+  - linkml:types
+classes:
+  Person:
+    tree_root: true
+    slots:
+      - age
+      - education_level
+      - gender
+      - height
+      - id
+      - income
+      - marital_status
+slots:
+  age:
+    range: xsd:integer
+  education_level:
+    range: EducationLevel
+  gender:
+    range: Gender
+  height:
+    range: xsd:integer
+  id:
+    range: xsd:integer
+  income:
+    range: xsd:integer
+  marital_status:
+    range: MaritalStatus
+enums:
+  EducationLevel:
+    permissible_values:
+      Bachelor's: 
+        text: "Bachelor's"
+        description: "Bachelor's degree"
+      "High School": 
+        text: "High School"
+        description: "High School diploma"
+  Gender:
+    permissible_values:
+      Female: 
+        text: "Female"
+        description: "Female gender"
+      Male: 
+        text: "Male"
+        description: "Male gender"
+  MaritalStatus:
+    permissible_values:
+      Single: 
+        text: "Single"
+        description: "Single status"
+      Married: 
+        text: "Married"
+        description: "Married status"

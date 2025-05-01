@@ -1,0 +1,15 @@
+records:
+- age: 35
+  educationLevel: Bachelor's
+  gender: Female
+  height: 152
+  id: 21
+  income: 52000
+  maritalStatus: Single
+- age: 19
+  educationLevel: High School
+  gender: Male
+  height: 175
+  id: 22
+  income: 32000
+  maritalStatus: Single
