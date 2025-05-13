@@ -59,18 +59,25 @@ Output Format: LINKML
 7. Define every slot in either  
    • the top-level **slots:** block, **or**  
    • the owning class’s **slot_usage:** block.  
-8. For list-valued attributes, always include both `multivalued: true` *and* `inlined_as_list: true`.  
-9. Use `range:` (never `type:`) for attribute typing. Primitives reference `xsd:` literals.
+8. If a slot name appears in classes.<Class>.slots, it must either be:
+   • defined under top-level slots: or
+   • defined inline under slot_usage in the same class (with full attributes like range:, multivalued:, etc.) so that the engine recognizes it as a genuine slot.
+9. For list-valued attributes, always include both `multivalued: true` *and* `inlined_as_list: true`.  
+10. Use `range:` (never `type:`) for attribute typing. Primitives reference `xsd:` literals.
+12. For any slot mentioned under classes.<MyClass>.slots, also ensure it is defined either in the top-level slots: 
+block or as a fully-defined slot in slot_usage: (for newer LinkML versions). Never just list a slot name without a matching definition.
+13. “Do not list any slot in classes.<Class>.slots unless there is a matching slot definition in the top-level slots: or inline in slot_usage:. 
+In particular, the ‘records’ slot on RecordCollection must be explicitly declared with range: Record, multivalued: true, and inlined_as_list: true.”
 
 # ──  Enumerations ────────────────────────────────
-10. Declare all enums under `enums:` using dictionary form with `permissible_values:`.  
+14. Declare all enums under `enums:` using dictionary form with `permissible_values:`.  
     • The **key** and its `text` must be identical (case-sensitive).  
     • Quote keys containing spaces or special characters.  
     • Reference enums in slots via `range: <EnumName>`.  
     • Never embed `permissible_values` inside a class attribute.
 
 # ──  Validation guard-rails ─────────────────────
-11. **Missing-slot safeguard** — *Every slot listed under any `classes.<Class>.slots` MUST have a matching definition.*  
+15. **Missing-slot safeguard** — *Every slot listed under any `classes.<Class>.slots` MUST have a matching definition.*  
     Correct pattern (copyable example):  
     ```yaml
     classes:
@@ -82,18 +89,64 @@ Output Format: LINKML
       given_name:             # ← matching definition
         range: xsd:string
     ```
-12. **Self-check directive** — After constructing `classes:` and their slot lists, iterate over **all** referenced slots (including primitives like `age`, `height`, etc.).  
+16. **Self-check directive** — After constructing `classes:` and their slot lists, iterate over **all** referenced slots (including primitives like `age`, `height`, etc.).  
     • **If even one slot lacks a definition, do NOT output the schema; regenerate instead until the check passes.**
 
 # ──  YAML style ─────────────────────────────────
-13. Use 2-space indentation throughout; never use TABs.
+17. Use 2-space indentation throughout; never use TABs.
 
 ####################################################
 ##  SECTION C – INSTANCE YAML RULES
 ####################################################
-14. Instance YAML must conform exactly to the schema (correct keys, ranges, enum spellings).  
-15. Begin with the collection slot key (`records:`).  
-16. Ensure the YAML can be pasted directly—no Markdown fencing or extra prose.
+18. Instance YAML must conform exactly to the schema (correct keys, ranges, enum spellings).  
+19. Begin with the collection slot key (`records:`).  
+20. Ensure the YAML can be pasted directly—no Markdown fencing or extra prose.
+
+The following is an example schema snippet that shows how to strcuture the schema especially around how the slot section is defined:
+
+```yaml
+id: http://example.org/my-schema
+name: ExampleSchema
+description: An example schema for representing data records.
+prefixes:
+  linkml: https://w3id.org/linkml/
+  xsd: http://www.w3.org/2001/XMLSchema#
+  default_prefix: ex
+imports:
+- linkml:types
+classes:
+  DataCollection:
+    tree_root: true
+    slots:
+    - data_entries
+  DataEntry:
+    slots:
+    - timestamp
+    - category
+    - value
+    - source
+    - description
+slots:
+  timestamp:
+    range: xsd:dateTime
+    multivalued: false
+  category:
+    range: xsd:string
+    multivalued: false
+  value:
+    range: xsd:float
+    multivalued: false
+  source:
+    range: xsd:string
+    multivalued: false
+  description:
+    range: xsd:string
+    multivalued: false
+  data_entries:
+    range: DataEntry
+    multivalued: true
+    inlined_as_list: true
+```
 
 """,
         "phenopackets-json": """
