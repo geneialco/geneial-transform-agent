@@ -5,6 +5,7 @@ import time
 import logging
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Literal, Tuple, Union
 from .workflow import run_agent_workflow
@@ -14,6 +15,11 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Path to the Phenopacket tools JAR file.
+# This is based on the user's provided example and might need to be configured
+# or ensured it's available in the execution environment.
+PHENOPACKET_TOOLS_JAR_PATH = "/Applications/phenopacket-tools-cli-1.0.0-RC3.jar"
 
 
 def get_system_prompt(output_format: str) -> str:
@@ -55,10 +61,10 @@ Output Format: LINKML
    • In the instance YAML, start with that slot key (`records:`).
 
 # ──  Classes & slots ─────────────────────────────
-6. Under `classes.<Class>.slots`, list **only slot names** (YAML list, each prefixed with “- ”).  
+6. Under `classes.<Class>.slots`, list **only slot names** (YAML list, each prefixed with "  ").  
 7. Define every slot in either  
    • the top-level **slots:** block, **or**  
-   • the owning class’s **slot_usage:** block.  
+   • the owning class's **slot_usage:** block.  
 8. If a slot name appears in classes.<Class>.slots, it must either be:
    • defined under top-level slots: or
    • defined inline under slot_usage in the same class (with full attributes like range:, multivalued:, etc.) so that the engine recognizes it as a genuine slot.
@@ -66,8 +72,8 @@ Output Format: LINKML
 10. Use `range:` (never `type:`) for attribute typing. Primitives reference `xsd:` literals.
 12. For any slot mentioned under classes.<MyClass>.slots, also ensure it is defined either in the top-level slots: 
 block or as a fully-defined slot in slot_usage: (for newer LinkML versions). Never just list a slot name without a matching definition.
-13. “Do not list any slot in classes.<Class>.slots unless there is a matching slot definition in the top-level slots: or inline in slot_usage:. 
-In particular, the ‘records’ slot on RecordCollection must be explicitly declared with range: Record, multivalued: true, and inlined_as_list: true.”
+13. "Do not list any slot in classes.<Class>.slots unless there is a matching slot definition in the top-level slots: or inline in slot_usage:. 
+In particular, the 'records' slot on RecordCollection must be explicitly declared with range: Record, multivalued: true, and inlined_as_list: true."
 
 # ──  Enumerations ────────────────────────────────
 14. Declare all enums under `enums:` using dictionary form with `permissible_values:`.  
@@ -153,13 +159,24 @@ slots:
 Output Format: PHENOPACKETS (JSON)
 
 Instructions for Phenopackets JSON format:
-- Follow the Phenopackets schema specification v2.0
-- Include all necessary phenotypic information
-- Maintain proper JSON structure
-- Include required fields: id, subject, phenotypic_features
-- Use proper ontology terms and references
+- Follow the Phenopackets schema specification v2.0 for cohort structure
+- Generate a cohort containing multiple phenopackets as members
+- Use proper cohort structure: {"id": "cohort-id", "description": "cohort description", "members": [array of phenopackets], "metaData": {...}}
+- The cohort-level metaData must include: created, createdBy, resources, phenopacketSchemaVersion
+- Each member in the "members" array should be a complete phenopacket with:
+  - Required fields: id, subject, phenotypicFeatures, metaData
+  - Subject structure must use:
+    * "id": "subject-id" (REQUIRED field - typically matches the phenopacket id)
+    * "timeAtLastEncounter": {"age": {"iso8601duration": "P35Y"}} (not direct "age" field)
+    * "sex": "FEMALE" or "MALE" (enum values, not objects)
+    * "karyotypicSex": "UNKNOWN_KARYOTYPE"
+  - PhenotypicFeatures structure: [{"type": {"id": "HP:0000118", "label": "Height"}, "excluded": false}]
+  - Required metaData fields: created, createdBy, resources, phenopacketSchemaVersion
+  - Resources array must have proper structure: [{"id": "hp", "name": "human phenotype ontology", "url": "http://purl.obolibrary.org/obo/hp.owl", "version": "2022-06-11", "namespacePrefix": "HP", "iriPrefix": "http://purl.obolibrary.org/obo/HP_"}]
+- Use proper ontology terms (HP: for phenotypes, etc.)
 - Create a phenopackets schema for the output and output it first after a line that says SCHEMA
-- After the schema output the output text after a line that says OUTPUT
+- After the schema output the cohort JSON directly (NOT wrapped in a "cohort" field) after a line that says OUTPUT
+- The OUTPUT should start directly with {"id": "cohort-id", "description": ...}, not {"cohort": {...}}
 - Do not include any other text before or after the SCHEMA or OUTPUT lines""",
         "phenopackets-csv": """
 Output Format: PHENOPACKETS (CSV)
@@ -493,6 +510,384 @@ def split_schema_and_output(result: Union[str, Dict, Any]) -> Tuple[str, str]:
     return schema_content, output_content
 
 
+def validate_output(
+    schema_content: str,
+    output_content: str,
+    output_format: str,
+    initial_full_prompt: str,
+    debug: bool = False,
+    max_retries: int = 10,
+) -> Tuple[str, str, bool, str]:
+    """
+    Validate output content and potentially correct it using LLM.
+
+    Args:
+        schema_content: The schema content to validate
+        output_content: The output content to validate
+        output_format: The output format ('linkml', 'phenopackets-json', 'phenopackets-csv')
+        initial_full_prompt: The original prompt for potential LLM correction
+        debug: Enable debug logging
+        max_retries: Maximum number of validation retry attempts
+
+    Returns:
+        Tuple of (corrected_schema_content, corrected_output_content, validation_successful, validation_message)
+    """
+    if debug:
+        logger.setLevel(logging.DEBUG)
+
+    # Initialize return values
+    corrected_schema_content = schema_content
+    corrected_output_content = output_content
+    validation_successful = False
+    validation_message = ""
+
+    if output_format == "linkml":
+        validation_retry_delay = 2  # seconds
+
+        for val_attempt in range(max_retries):
+            logger.info(
+                "Starting LinkML validation attempt %d of %d.",
+                val_attempt + 1,
+                max_retries,
+            )
+
+            # Create temporary files for validation
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+            ) as schema_file:
+                schema_file.write(corrected_schema_content)
+                schema_path = schema_file.name
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+            ) as output_file:
+                output_file.write(corrected_output_content)
+                output_path = output_file.name
+
+            try:
+                if not corrected_schema_content.strip():
+                    validation_message = (
+                        "LinkML validation failed: Schema content is empty."
+                    )
+                    logger.error(validation_message)
+                    validation_successful = False
+                    break
+
+                target_class = None
+                try:
+                    match = re.search(
+                        r"^classes:\s*\n(?:\s*#.*\n)*\s*(\w+):",
+                        corrected_schema_content,
+                        re.MULTILINE,
+                    )
+                    if match:
+                        target_class = match.group(1)
+                        logger.info(
+                            f"Extracted target class for LinkML: {target_class}"
+                        )
+                    else:
+                        validation_message = "Could not find 'classes:' section or target class in LinkML schema."
+                        logger.error(validation_message)
+                        validation_successful = False
+                        break
+                except Exception as e:
+                    validation_message = (
+                        f"Error extracting target class from LinkML schema: {e}"
+                    )
+                    logger.error(validation_message)
+                    validation_successful = False
+                    break
+
+                validation_cmd = [
+                    "linkml-validate",
+                    "--schema",
+                    schema_path,
+                    "--target-class",
+                    target_class,
+                    output_path,
+                ]
+                logger.info(
+                    f"Running LinkML validation command: {' '.join(validation_cmd)}"
+                )
+
+                try:
+                    process = subprocess.run(
+                        validation_cmd, capture_output=True, text=True, check=False
+                    )
+                    stdout = process.stdout.strip()
+                    stderr = process.stderr.strip()
+                    logger.debug(f"linkml-validate stdout:\n{stdout}")
+                    logger.debug(f"linkml-validate stderr:\n{stderr}")
+
+                    if process.returncode == 0 and "No issues found" in stdout:
+                        validation_message = (
+                            "LinkML validation successful! No issues found."
+                        )
+                        logger.info(validation_message)
+                        validation_successful = True
+                        break
+                    else:
+                        error_message = stderr if stderr else stdout
+                        validation_message = f"LinkML validation attempt {val_attempt + 1} failed. Error:\n{error_message}"
+                        logger.error(validation_message)
+
+                        if val_attempt < max_retries - 1:
+                            logger.info("Attempting to fix LinkML using LLM...")
+                            fix_prompt = (
+                                f"{initial_full_prompt}\n\n"
+                                f"--- PREVIOUSLY GENERATED SCHEMA ---\n{corrected_schema_content}\n"
+                                f"--- PREVIOUSLY GENERATED OUTPUT ---\n{corrected_output_content}\n\n"
+                                f"--- VALIDATION ERROR ---\n{error_message}\n\n"
+                                f"--- INSTRUCTION ---\n"
+                                f"The previous LinkML generation resulted in the validation error above. "
+                                f"Please analyze the schema, output, and the error message. "
+                                f"Fix the issues in the schema and/or output according to the LinkML rules and the error. "
+                                f"Provide the corrected full schema content after a 'SCHEMA' line and the corrected full output content after an 'OUTPUT' line."
+                            )
+                            logger.debug("LLM Fix Prompt (LinkML):\n%s", fix_prompt)
+
+                            try:
+                                result = run_agent_workflow(fix_prompt, debug=debug)
+                                logger.info(
+                                    "LinkML correction attempt workflow completed."
+                                )
+                                new_schema_content, new_output_content = (
+                                    split_schema_and_output(result)
+                                )
+
+                                if not new_output_content:
+                                    logger.warning(
+                                        f"LinkML correction attempt {val_attempt + 1} did not produce output content. Retrying validation with previous content."
+                                    )
+                                else:
+                                    if new_schema_content:
+                                        try:
+                                            yaml.safe_load(new_schema_content)
+                                            corrected_schema_content = (
+                                                new_schema_content
+                                            )
+                                            logger.info(
+                                                "Updated corrected LinkML schema content"
+                                            )
+                                        except yaml.YAMLError as e:
+                                            logger.warning(
+                                                f"LLM correction produced invalid YAML schema for LinkML: {e}. Keeping previous schema."
+                                            )
+                                    else:
+                                        logger.warning(
+                                            "LLM correction did not produce LinkML schema content. Keeping previous schema."
+                                        )
+                                    corrected_output_content = new_output_content
+                                    logger.info(
+                                        "Updated corrected LinkML output content"
+                                    )
+                            except Exception as llm_e:
+                                logger.error(
+                                    f"LLM Correction attempt {val_attempt + 1} for LinkML failed during workflow: {llm_e}"
+                                )
+                            logger.info(
+                                f"Retrying LinkML validation in {validation_retry_delay} seconds..."
+                            )
+                            time.sleep(validation_retry_delay)
+                        else:
+                            validation_message = f"LinkML validation failed after {max_retries} attempts."
+                            logger.error(validation_message)
+                            validation_successful = False
+                except FileNotFoundError:
+                    validation_message = "LinkML validation failed: 'linkml-validate' command not found. Make sure LinkML is installed and in the system PATH."
+                    logger.error(validation_message)
+                    validation_successful = False
+                    break
+                except Exception as val_e:
+                    validation_message = f"An unexpected error occurred during LinkML validation: {val_e}"
+                    logger.error(validation_message)
+                    validation_successful = False
+                    break
+            finally:
+                # Clean up temporary files
+                try:
+                    Path(schema_path).unlink()
+                    Path(output_path).unlink()
+                except Exception as e:
+                    logger.debug(f"Error cleaning up temporary files: {e}")
+
+    elif output_format == "phenopackets-json":
+        validation_retry_delay = 2  # seconds
+
+        for val_attempt in range(max_retries):
+            logger.info(
+                "Starting Phenopacket validation attempt %d of %d.",
+                val_attempt + 1,
+                max_retries,
+            )
+
+            # Create temporary file for validation
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False, encoding="utf-8"
+            ) as output_file:
+                output_file.write(corrected_output_content)
+                output_path = output_file.name
+
+            try:
+                if not corrected_output_content.strip():
+                    validation_message = (
+                        "Phenopacket validation failed: Output content is empty."
+                    )
+                    logger.error(validation_message)
+                    validation_successful = False
+                    break
+
+                if not Path(PHENOPACKET_TOOLS_JAR_PATH).exists():
+                    validation_message = f"Phenopacket validator JAR not found at {PHENOPACKET_TOOLS_JAR_PATH}. Cannot perform validation."
+                    logger.error(validation_message)
+                    validation_successful = False
+                    break
+
+                validation_cmd = [
+                    "java",
+                    "-jar",
+                    PHENOPACKET_TOOLS_JAR_PATH,
+                    "validate",
+                    "-f",  # Format specification
+                    "json",
+                    "-e",  # Element type to validate
+                    "cohort",
+                    output_path,
+                ]
+                logger.info(
+                    f"Running Phenopacket validation command: {' '.join(validation_cmd)}"
+                )
+
+                process = subprocess.run(
+                    validation_cmd, capture_output=True, text=True, check=False
+                )
+
+                raw_stdout = process.stdout
+                raw_stderr = process.stderr
+                cli_message_output = (raw_stdout if raw_stdout else raw_stderr).strip()
+
+                logger.debug(f"Phenopacket validator raw stdout:\n{raw_stdout}")
+                logger.debug(f"Phenopacket validator raw stderr:\n{raw_stderr}")
+                logger.debug(f"Phenopacket validator return code: {process.returncode}")
+                logger.debug(
+                    f"Phenopacket validator interpreted CLI message: '{cli_message_output}'"
+                )
+
+                if process.returncode == 0 and not cli_message_output:
+                    validation_message = (
+                        "Phenopacket validation successful! No issues found."
+                    )
+                    logger.info(validation_message)
+                    validation_successful = True
+                    break
+                else:
+                    error_detail = cli_message_output
+                    if not error_detail and process.returncode != 0:
+                        error_detail = "Validator exited with a non-zero status but provided no specific error message via stdout/stderr."
+                    elif not error_detail and process.returncode == 0:
+                        error_detail = "Validator exited with status 0 but produced unexpected output, indicating a potential issue."
+
+                    error_message = f"Phenopacket validation failed with return code {process.returncode}.\nValidator output:\n{error_detail}"
+                    validation_message = f"Phenopacket validation attempt {val_attempt + 1} failed. Error:\n{error_message}"
+                    logger.error(validation_message)
+
+                    if val_attempt < max_retries - 1:
+                        logger.info("Attempting to fix Phenopacket using LLM...")
+                        fix_prompt = (
+                            f"{initial_full_prompt}\n\n"
+                            f"--- PREVIOUSLY GENERATED SCHEMA ---\n{corrected_schema_content}\n"
+                            f"--- PREVIOUSLY GENERATED PHENOPACKET OUTPUT ---\n{corrected_output_content}\n\n"
+                            f"--- VALIDATION ERROR ---\n{error_message}\n\n"
+                            f"--- INSTRUCTION ---\n"
+                            f"The previous Phenopacket generation resulted in the validation error above. "
+                            f"Please analyze the schema (if any), the Phenopacket output, and the error message. "
+                            f"Fix the issues in the Phenopacket output and, if necessary, the schema. "
+                            f"Provide the corrected full schema content after a 'SCHEMA' line and the corrected full Phenopacket JSON output content after an 'OUTPUT' line."
+                        )
+                        logger.debug("LLM Fix Prompt (Phenopacket):\n%s", fix_prompt)
+
+                        try:
+                            result = run_agent_workflow(fix_prompt, debug=debug)
+                            logger.info(
+                                "Phenopacket correction attempt workflow completed."
+                            )
+                            new_schema_content, new_output_content = (
+                                split_schema_and_output(result)
+                            )
+
+                            if not new_output_content:
+                                logger.warning(
+                                    f"Phenopacket correction attempt {val_attempt + 1} did not produce output content. Retrying validation with previous content."
+                                )
+                            else:
+                                if new_schema_content:
+                                    try:
+                                        json.loads(
+                                            new_schema_content
+                                        )  # Check if valid JSON
+                                        corrected_schema_content = new_schema_content
+                                        logger.info(
+                                            "Updated corrected Phenopacket schema content"
+                                        )
+                                    except json.JSONDecodeError as e:
+                                        logger.warning(
+                                            f"LLM correction produced invalid JSON schema for Phenopacket: {e}. Keeping previous schema."
+                                        )
+                                else:
+                                    logger.warning(
+                                        "LLM correction did not produce Phenopacket schema content. Keeping previous schema."
+                                    )
+
+                                corrected_output_content = new_output_content
+                                logger.info(
+                                    "Updated corrected Phenopacket output content"
+                                )
+
+                        except Exception as llm_e:
+                            logger.error(
+                                f"LLM Correction attempt {val_attempt + 1} for Phenopacket failed during workflow: {llm_e}"
+                            )
+
+                        logger.info(
+                            f"Retrying Phenopacket validation in {validation_retry_delay} seconds..."
+                        )
+                        time.sleep(validation_retry_delay)
+                    else:
+                        validation_message = f"Phenopacket validation failed after {max_retries} attempts."
+                        logger.error(validation_message)
+                        validation_successful = False
+
+            except FileNotFoundError as fnf_e:
+                validation_message = f"Phenopacket validation failed due to FileNotFoundError: {fnf_e}. Ensure Java is installed and PHENOPACKET_TOOLS_JAR_PATH is correct."
+                logger.error(validation_message)
+                validation_successful = False
+                break
+            except Exception as val_e:
+                validation_message = f"An unexpected error occurred during Phenopacket validation: {val_e}"
+                logger.error(validation_message)
+                validation_successful = False
+                break
+            finally:
+                # Clean up temporary file
+                try:
+                    Path(output_path).unlink()
+                except Exception as e:
+                    logger.debug(f"Error cleaning up temporary file: {e}")
+
+    else:
+        # For formats that don't have validation implemented
+        validation_successful = True
+        validation_message = f"Validation not implemented for format: {output_format}"
+        logger.info(validation_message)
+
+    return (
+        corrected_schema_content,
+        corrected_output_content,
+        validation_successful,
+        validation_message,
+    )
+
+
 def process_file(
     input_path: str,
     output_path: str,
@@ -603,20 +998,6 @@ def process_file(
                 except json.JSONDecodeError as e:
                     raise ValueError(f"Generated schema is not valid JSON: {e}")
 
-            # Save the potentially valid schema (if exists)
-            if schema_content:
-                save_output_file(schema_content, schema_path, output_format)
-                logger.info("Saved schema to: %s", schema_path)
-            else:
-                logger.warning(
-                    "No schema was generated, but continuing since output exists"
-                )
-                Path(schema_path).touch()  # Create empty file if no schema
-
-            # Save the output content (parsing/validation depends on format/validation step)
-            save_output_file(output_content, output_path, output_format)
-            logger.info("Saved output to: %s", output_path)
-
             # If we got here, initial generation was successful enough to proceed
             logger.info("Initial generation successful (attempt %d)", attempt + 1)
             break  # Exit the initial generation retry loop
@@ -643,209 +1024,45 @@ def process_file(
                     f"Failed initial generation after {max_retries} attempts. Last error: {last_initial_error}"
                 )
 
-    # --- Validation and Correction Loop (if requested) ---
-    if validate and output_format == "linkml":
-        # Remove hardcoded value, use max_retries from args
-        validation_retry_delay = 2  # seconds
-        validation_successful = False
-        successful_val_attempt_count = 0  # To store the attempt number on success
+    # --- Validation and Correction (if requested) ---
+    if validate:
+        logger.info("Running validation...")
+        (
+            corrected_schema_content,
+            corrected_output_content,
+            validation_successful,
+            validation_message,
+        ) = validate_output(
+            schema_content,
+            output_content,
+            output_format,
+            initial_full_prompt,
+            debug,
+            max_retries,
+        )
 
-        for val_attempt in range(max_retries):  # Use max_retries here
-            logger.info(
-                "Starting validation attempt %d of %d for LinkML.",
-                val_attempt + 1,
-                max_retries,  # Use max_retries here
-            )
-
-            if not Path(schema_path).exists() or Path(schema_path).stat().st_size == 0:
-                logger.error(
-                    "Validation failed: Schema file '%s' is missing or empty.",
-                    schema_path,
-                )
-                # Treat this as a validation failure, maybe prompt LLM to generate it?
-                # For now, we break the validation loop if schema is missing after generation
-                # Could potentially add logic here to prompt for schema generation specifically.
-                validation_successful = False
-                break  # Exit validation loop
-
-            # 1. Extract Target Class from Schema
-            target_class = None
-            try:
-                with open(schema_path, "r", encoding="utf-8") as f:
-                    schema_file_content = f.read()
-                # Regex to find the first class name after 'classes:'
-                # Looks for 'classes:', optional whitespace/newline, then captures the word before ':'
-                match = re.search(
-                    r"^classes:\s*\n(?:\s*#.*\n)*\s*(\w+):",
-                    schema_file_content,
-                    re.MULTILINE,
-                )
-                if match:
-                    target_class = match.group(1)
-                    logger.info(f"Extracted target class: {target_class}")
-                else:
-                    logger.error(
-                        "Could not find 'classes:' section or target class in schema file: %s",
-                        schema_path,
-                    )
-                    # This is a validation failure, maybe prompt LLM to fix schema structure?
-                    # Break validation loop for now.
-                    validation_successful = False
-                    break
-            except Exception as e:
-                logger.error(
-                    f"Error reading schema or extracting target class from {schema_path}: {e}"
-                )
-                validation_successful = False
-                break  # Exit validation loop
-
-            # 2. Run linkml-validate command
-            validation_cmd = [
-                "linkml-validate",
-                "--schema",
-                str(schema_path),
-                "--target-class",
-                target_class,
-                str(output_path),
-            ]
-            logger.info(f"Running validation command: {' '.join(validation_cmd)}")
-
-            try:
-                process = subprocess.run(
-                    validation_cmd, capture_output=True, text=True, check=False
-                )  # check=False to handle errors manually
-                stdout = process.stdout.strip()
-                stderr = process.stderr.strip()
-                logger.debug(f"linkml-validate stdout:\n{stdout}")
-                logger.debug(f"linkml-validate stderr:\n{stderr}")
-
-                # 3. Check validation result
-                # linkml-validate exits 0 on success and prints "No issues found" to stdout
-                # It exits non-zero on failure and prints errors to stderr
-                if process.returncode == 0 and "No issues found" in stdout:
-                    logger.info("Validation successful! No issues found.")
-                    validation_successful = True
-                    successful_val_attempt_count = (
-                        val_attempt + 1
-                    )  # Record successful attempt number
-                    break  # Exit validation loop
-                else:
-                    # Validation failed
-                    error_message = (
-                        stderr if stderr else stdout
-                    )  # Prefer stderr for errors
-                    logger.error(
-                        f"Validation attempt {val_attempt + 1} failed. Error:\n{error_message}"
-                    )
-
-                    if val_attempt < max_retries - 1:
-                        logger.info("Attempting to fix using LLM...")
-                        # Construct prompt for LLM to fix the issue
-                        fix_prompt = (
-                            f"{initial_full_prompt}\n\n"
-                            f"--- PREVIOUSLY GENERATED SCHEMA ---\n{schema_content}\n"
-                            f"--- PREVIOUSLY GENERATED OUTPUT ---\n{output_content}\n\n"
-                            f"--- VALIDATION ERROR ---\n{error_message}\n\n"
-                            f"--- INSTRUCTION ---\n"
-                            f"The previous generation resulted in the validation error above. "
-                            f"Please analyze the schema, output, and the error message. "
-                            f"Fix the issues in the schema and/or output according to the LinkML rules and the error. "
-                            f"Provide the corrected full schema content after a 'SCHEMA' line and the corrected full output content after an 'OUTPUT' line."
-                        )
-                        logger.debug("LLM Fix Prompt:\n%s", fix_prompt)
-
-                        # Call LLM again
-                        try:
-                            result = run_agent_workflow(fix_prompt, debug=debug)
-                            logger.info("Correction attempt workflow completed.")
-
-                            # Re-split and save
-                            new_schema_content, new_output_content = (
-                                split_schema_and_output(result)
-                            )
-
-                            if not new_output_content:
-                                logger.warning(
-                                    f"Correction attempt {val_attempt + 1} did not produce output content. Retrying validation with previous files."
-                                )
-                                # Keep old content, validation will likely fail again, but prevents erroring out here
-                            else:
-                                # Basic check for schema validity before saving
-                                if new_schema_content:
-                                    try:
-                                        yaml.safe_load(new_schema_content)
-                                        schema_content = (
-                                            new_schema_content  # Update schema content
-                                        )
-                                        save_output_file(
-                                            schema_content, schema_path, output_format
-                                        )
-                                        logger.info(
-                                            f"Saved corrected schema to: {schema_path}"
-                                        )
-                                    except yaml.YAMLError as e:
-                                        logger.warning(
-                                            f"LLM correction produced invalid YAML schema: {e}. Keeping previous schema."
-                                        )
-                                        # Keep old schema content
-                                else:
-                                    logger.warning(
-                                        "LLM correction did not produce schema content. Keeping previous schema."
-                                    )
-                                    # Keep old schema content if LLM didn't provide one
-
-                                output_content = (
-                                    new_output_content  # Update output content
-                                )
-                                save_output_file(
-                                    output_content, output_path, output_format
-                                )
-                                logger.info(f"Saved corrected output to: {output_path}")
-
-                        except Exception as llm_e:
-                            logger.error(
-                                f"LLM Correction attempt {val_attempt + 1} failed during workflow: {llm_e}"
-                            )
-                            # Continue to next validation attempt with old files
-
-                        logger.info(
-                            f"Retrying validation in {validation_retry_delay} seconds..."
-                        )
-                        time.sleep(validation_retry_delay)
-                    else:
-                        # Max validation retries reached
-                        logger.error(
-                            "Validation failed after %d attempts.",
-                            max_retries,  # Use max_retries here
-                        )
-                        validation_successful = False
-                        # Keep loop going so it exits naturally and raises error below
-
-            except FileNotFoundError:
-                logger.error(
-                    f"Validation failed: 'linkml-validate' command not found. Make sure LinkML is installed and in the system PATH."
-                )
-                validation_successful = False
-                break  # Cannot proceed without the command
-            except Exception as val_e:
-                logger.error(f"An unexpected error occurred during validation: {val_e}")
-                validation_successful = False
-                break  # Exit validation loop on unexpected error
-
-        # After validation loop: check final status
         if not validation_successful:
-            raise ValueError(
-                f"LinkML validation failed after {max_retries} attempts. Check logs for details."  # Use max_retries here
-            )
+            raise ValueError(f"Validation failed: {validation_message}")
         else:
-            logger.info(
-                f"LinkML validation completed successfully after {successful_val_attempt_count} attempt(s)."
-            )
+            logger.info(f"Validation completed successfully: {validation_message}")
+            # Use the potentially corrected content
+            schema_content = corrected_schema_content
+            output_content = corrected_output_content
+    else:
+        logger.info("Validation not requested, skipping validation step.")
 
-    # --- End of Validation --- (or if validation wasn't requested) ---
-    # If we reach here, either validation was not requested, not applicable, or succeeded.
+    # Save the final content to files
+    if schema_content:
+        save_output_file(schema_content, schema_path, output_format)
+        logger.info("Saved schema to: %s", schema_path)
+    else:
+        logger.warning("No schema was generated, but continuing since output exists")
+        Path(schema_path).touch()  # Create empty file if no schema
+
+    save_output_file(output_content, output_path, output_format)
+    logger.info("Saved output to: %s", output_path)
+
     logger.info("Processing finished successfully.")
-    # Return is implicit (None)
 
 
 def main():
