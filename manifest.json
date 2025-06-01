@@ -1,0 +1,1 @@
+{"name": "Langmanus Transform MCP Server", "version": "1.0.0", "description": "MCP Server for transforming data between formats (LinkML, Phenopackets)", "endpoints": {"health": "/health", "formats": "/formats", "intents": "/intents", "process_intent": "/process_intent", "transform": "/transform"}, "authentication": "X-API-Key header required", "supported_intents": []}

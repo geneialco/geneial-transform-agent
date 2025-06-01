@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "langmanus-transform": {
+      "command": "put your path to python3 here",
+      "args": ["-m", "src.mcp_server_stdio"],
+      "cwd": "put your path to langmanus-transform here",
+      "env": {
+        "PYTHONPATH": "put your path to langmanus-transform here",
+        "MAX_RETRIES": "10",
+        "PHENOPACKET_TOOLS_JAR_PATH": "put your path to phenopacket-tools-cli-1.0.0-RC3.jar here"
+      }
+    }
+  }
+} 

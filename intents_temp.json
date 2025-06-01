@@ -1,0 +1,5 @@
+{"intent":"transform_to_linkml","description":"Transform input data to LinkML format","required_parameters":["input_content","user_prompt","validate","debug"]}
+{"intent":"transform_to_phenopackets_json","description":"Transform input data to Phenopackets JSON format","required_parameters":["input_content","user_prompt","validate","debug"]}
+{"intent":"transform_to_phenopackets_csv","description":"Transform input data to Phenopackets CSV format","required_parameters":["input_content","user_prompt","validate","debug"]}
+{"intent":"validate_linkml","description":"Validate LinkML schema and data","required_parameters":["schema_content","data_content"]}
+{"intent":"validate_phenopackets","description":"Validate Phenopackets JSON","required_parameters":["phenopacket_content"]}
