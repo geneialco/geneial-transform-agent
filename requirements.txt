@@ -4,11 +4,35 @@ linkml>=1.5.0
 linkml-runtime>=1.5.0
 
 # FastAPI dependencies for MCP server
-fastapi==0.104.1
-uvicorn==0.23.2
-pydantic==2.4.2
-httpx==0.25.0
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.5
+httpx>=0.27
 python-dotenv==1.0.0
 
 # Additional dependencies that might be needed
-python-multipart>=0.0.6  # For file uploads in FastAPI 
+python-multipart>=0.0.6  # For file uploads in FastAPI
+requests>=2.31.0  # For UMLS API client integration
+langgraph>=0.6
+langchain-core>=0.3
+langsmith>=0.3
+
+# Runtime dependencies
+json-repair
+protobuf
+MainContentExtractor
+langchain-anthropic>=0.3.0
+
+# LLM clients and providers
+json-repair>=0.7.0
+langchain-community>=0.3.19
+langchain-openai>=0.3.8
+langchain-deepseek>=0.1.2
+litellm>=1.63.11
+langchain-experimental>=0.3.4
+
+# Crawler and browser utilities
+markdownify>=1.1.0
+readabilipy>=0.3.0
+browser-use>=0.1.0
+socksio>=1.0.0
