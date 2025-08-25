@@ -4,9 +4,24 @@ import json
 from pydantic import BaseModel, Field
 from typing import Optional, ClassVar, Type
 from langchain.tools import BaseTool
-from browser_use import AgentHistoryList, Browser, BrowserConfig
-from browser_use import Agent as BrowserAgent
-from src.llms.llm import vl_llm
+
+# Attempt to import optional browser_use dependency. If unavailable,
+# we provide a graceful stub so the rest of the application can run.
+try:
+    from browser_use import AgentHistoryList, Browser, BrowserConfig
+    from browser_use import Agent as BrowserAgent
+
+    _BROWSER_AVAILABLE = True
+    _BROWSER_IMPORT_ERROR = None
+except (
+    Exception
+) as _e:  # ImportError or downstream missing deps (e.g., main_content_extractor)
+    AgentHistoryList = None  # type: ignore
+    Browser = None  # type: ignore
+    BrowserConfig = None  # type: ignore
+    BrowserAgent = None  # type: ignore
+    _BROWSER_AVAILABLE = False
+    _BROWSER_IMPORT_ERROR = _e
 from src.tools.decorators import create_logged_tool
 from src.config import (
     CHROME_INSTANCE_PATH,
@@ -21,21 +36,24 @@ import uuid
 # Configure logging
 logger = logging.getLogger(__name__)
 
-browser_config = BrowserConfig(
-    headless=CHROME_HEADLESS,
-    chrome_instance_path=CHROME_INSTANCE_PATH,
-)
-if CHROME_PROXY_SERVER:
-    proxy_config = {
-        "server": CHROME_PROXY_SERVER,
-    }
-    if CHROME_PROXY_USERNAME:
-        proxy_config["username"] = CHROME_PROXY_USERNAME
-    if CHROME_PROXY_PASSWORD:
-        proxy_config["password"] = CHROME_PROXY_PASSWORD
-    browser_config.proxy = proxy_config
+if _BROWSER_AVAILABLE:
+    browser_config = BrowserConfig(
+        headless=CHROME_HEADLESS,
+        chrome_instance_path=CHROME_INSTANCE_PATH,
+    )
+    if CHROME_PROXY_SERVER:
+        proxy_config = {
+            "server": CHROME_PROXY_SERVER,
+        }
+        if CHROME_PROXY_USERNAME:
+            proxy_config["username"] = CHROME_PROXY_USERNAME
+        if CHROME_PROXY_PASSWORD:
+            proxy_config["password"] = CHROME_PROXY_PASSWORD
+        browser_config.proxy = proxy_config
 
-expected_browser = Browser(config=browser_config)
+    expected_browser = Browser(config=browser_config)
+else:
+    expected_browser = None
 
 
 class BrowserUseInput(BaseModel):
@@ -62,8 +80,27 @@ class BrowserTool(BaseTool):
         }
 
     def _run(self, instruction: str) -> str:
+        if not _BROWSER_AVAILABLE:
+            err_name = (
+                type(_BROWSER_IMPORT_ERROR).__name__
+                if _BROWSER_IMPORT_ERROR
+                else "ImportError"
+            )
+            err_msg = (
+                str(_BROWSER_IMPORT_ERROR)
+                if _BROWSER_IMPORT_ERROR
+                else "browser_use dependency not available"
+            )
+            return (
+                f"Browser tool is unavailable ({err_name}): {err_msg}. "
+                f"Install 'browser-use' and its dependencies or disable the browser tool."
+            )
+
         generated_gif_path = f"{BROWSER_HISTORY_DIR}/{uuid.uuid4()}.gif"
         """Run the browser task synchronously."""
+        # Lazy import to avoid requiring optional deps when unused
+        from src.llms.llm import vl_llm  # type: ignore
+
         self._agent = BrowserAgent(
             task=instruction,  # Will be set per request
             llm=vl_llm,
@@ -77,7 +114,9 @@ class BrowserTool(BaseTool):
             try:
                 result = loop.run_until_complete(self._agent.run())
 
-                if isinstance(result, AgentHistoryList):
+                if AgentHistoryList is not None and isinstance(
+                    result, AgentHistoryList
+                ):
                     return json.dumps(
                         self._generate_browser_result(
                             result.final_result(), generated_gif_path
@@ -103,7 +142,26 @@ class BrowserTool(BaseTool):
 
     async def _arun(self, instruction: str) -> str:
         """Run the browser task asynchronously."""
+        if not _BROWSER_AVAILABLE:
+            err_name = (
+                type(_BROWSER_IMPORT_ERROR).__name__
+                if _BROWSER_IMPORT_ERROR
+                else "ImportError"
+            )
+            err_msg = (
+                str(_BROWSER_IMPORT_ERROR)
+                if _BROWSER_IMPORT_ERROR
+                else "browser_use dependency not available"
+            )
+            return (
+                f"Browser tool is unavailable ({err_name}): {err_msg}. "
+                f"Install 'browser-use' and its dependencies or disable the browser tool."
+            )
+
         generated_gif_path = f"{BROWSER_HISTORY_DIR}/{uuid.uuid4()}.gif"
+        # Lazy import to avoid requiring optional deps when unused
+        from src.llms.llm import vl_llm  # type: ignore
+
         self._agent = BrowserAgent(
             task=instruction,
             llm=vl_llm,
@@ -112,7 +170,7 @@ class BrowserTool(BaseTool):
         )
         try:
             result = await self._agent.run()
-            if isinstance(result, AgentHistoryList):
+            if AgentHistoryList is not None and isinstance(result, AgentHistoryList):
                 return json.dumps(
                     self._generate_browser_result(
                         result.final_result(), generated_gif_path
