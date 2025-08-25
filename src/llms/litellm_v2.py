@@ -140,8 +140,37 @@ class ChatLiteLLMV2(ChatLiteLLM):
                     key_name=tool_name, first_tool_only=True
                 )
         elif method == "json_mode":
+            # Prefer strict JSON schema when we have a Pydantic schema and the provider supports it.
+            response_format: Dict[str, Any]
+            if is_pydantic_schema:
+                try:
+                    # Pydantic v2
+                    json_schema: Dict[str, Any] = schema.model_json_schema()  # type: ignore[attr-defined]
+                except Exception:
+                    try:
+                        # Pydantic v1 fallback
+                        json_schema = schema.schema()  # type: ignore[attr-defined]
+                    except Exception:
+                        json_schema = {}
+
+                response_format = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": getattr(schema, "__name__", "StructuredOutput"),
+                        "schema": json_schema,
+                    },
+                }
+            else:
+                # Some OpenAI-compatible providers only accept 'json_schema' or 'text'.
+                # If we don't have a formal schema, fall back to plain text to avoid 400s.
+                if self.model and str(self.model).startswith("openai"):
+                    response_format = {"type": "text"}
+                else:
+                    # Non-openai providers may accept 'json_object'
+                    response_format = {"type": "json_object"}
+
             llm = self.bind(
-                response_format={"type": "json_object"},
+                response_format=response_format,
                 ls_structured_output_format={
                     "kwargs": {"method": method},
                     "schema": schema,
