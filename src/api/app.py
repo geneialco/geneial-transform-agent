@@ -114,7 +114,7 @@ async def chat_endpoint(request: ChatRequest, req: Request):
                     messages,
                     request.debug,
                     request.deep_thinking_mode,
-                    request.search_before_planning,
+                    False,  # search_before_planning disabled by default for offline behavior
                     request.team_members,
                 ):
                     # Check if client is still connected

@@ -168,7 +168,7 @@ def run_agent_workflow(user_input: str, debug: bool = False):
         # Using dicts for now, assuming graph handles conversion if needed
         "messages": [{"role": "user", "content": user_input}],
         "deep_thinking_mode": True,
-        "search_before_planning": True,
+        "search_before_planning": False,
     }
 
     logger.info(

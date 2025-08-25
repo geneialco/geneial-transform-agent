@@ -247,7 +247,8 @@ async def handle_call_tool(params: Optional[Dict[str, Any]]) -> CallToolResult:
             logger.debug(f"Full prompt:\n{full_prompt}")
 
         # Run the workflow
-        result = run_agent_workflow(full_prompt, debug=debug)
+        # Run in offline mode by default; enable search only via explicit config (future extension)
+        result = run_agent_workflow(full_prompt, debug=debug, use_umls=False, use_search=False)
 
         # Split result into schema and output
         schema_content, output_content = split_schema_and_output(result)
