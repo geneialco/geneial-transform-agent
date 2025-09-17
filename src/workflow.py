@@ -6,6 +6,26 @@ import logging
 from src.config import TEAM_MEMBER_CONFIGRATIONS, TEAM_MEMBERS
 from src.config.tracing import configure_langsmith_tracing
 from src.graph import build_graph
+from src.agents.agents import create_agents_with_umls
+from langgraph.graph import StateGraph, START
+from src.graph.types import State
+from src.graph.nodes import (
+    supervisor_node,
+    coordinator_node,
+    browser_node,
+    reporter_node,
+    planner_node,
+)
+import logging
+from copy import deepcopy
+from typing import Literal
+from langchain_core.messages import HumanMessage, BaseMessage
+from langgraph.types import Command
+from src.llms.llm import get_llm_by_type
+from src.config import TEAM_MEMBERS
+from src.config.agents import AGENT_LLM_MAP
+from src.prompts.template import apply_prompt_template
+from src.utils.json_utils import repair_json_output
 
 # Configure logging
 logging.basicConfig(
@@ -140,12 +160,85 @@ def find_ai_response(result_dict: dict) -> object | None:
 # --- End Helper Function ---
 
 
-def run_agent_workflow(user_input: str, debug: bool = False):
+def create_custom_nodes(use_umls: bool = False, use_search: bool = False):
+    """Create nodes using agents configured with optional UMLS tools and optional Tavily search."""
+    research_agent_custom, coder_agent_custom, browser_agent_custom = (
+        create_agents_with_umls(use_umls=use_umls, use_search=use_search)
+    )
+
+    def research_node_custom(state: State) -> Command[Literal["supervisor"]]:
+        """Research node using custom-configured agent (UMLS/search as requested)."""
+        logger.info("Custom Research agent starting task")
+        result = research_agent_custom.invoke(state)
+        logger.info("Custom Research agent completed task")
+        response_content = result["messages"][-1].content
+        response_content = repair_json_output(response_content)
+        logger.debug(f"UMLS Research agent response: {response_content}")
+        return Command(
+            update={
+                "messages": [
+                    HumanMessage(
+                        content=response_content,
+                        name="researcher",
+                    )
+                ]
+            },
+            goto="supervisor",
+        )
+
+    def code_node_custom(state: State) -> Command[Literal["supervisor"]]:
+        """Coder node using custom-configured agent (UMLS/search as requested)."""
+        logger.info("Custom Coder agent starting task")
+        result = coder_agent_custom.invoke(state)
+        logger.info("Custom Coder agent completed task")
+        response_content = result["messages"][-1].content
+        response_content = repair_json_output(response_content)
+        logger.debug(f"UMLS Coder agent response: {response_content}")
+        return Command(
+            update={
+                "messages": [
+                    HumanMessage(
+                        content=response_content,
+                        name="coder",
+                    )
+                ]
+            },
+            goto="supervisor",
+        )
+
+    return research_node_custom, code_node_custom
+
+
+def build_custom_graph(use_umls: bool = False, use_search: bool = False):
+    """Build and return an agent workflow graph configured with optional UMLS tools and optional Tavily search."""
+    research_node_custom, code_node_custom = create_custom_nodes(
+        use_umls=use_umls, use_search=use_search
+    )
+
+    builder = StateGraph(State)
+    builder.add_edge(START, "coordinator")
+    builder.add_node("coordinator", coordinator_node)
+    builder.add_node("planner", planner_node)
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("researcher", research_node_custom)
+    builder.add_node("coder", code_node_custom)
+    builder.add_node("browser", browser_node)
+    builder.add_node("reporter", reporter_node)
+    return builder.compile()
+
+
+def run_agent_workflow(
+    user_input: str,
+    debug: bool = False,
+    use_umls: bool = False,
+    use_search: bool = False,
+):
     """Run the agent workflow with the given user input.
 
     Args:
         user_input: The user's query or request
         debug: If True, enables debug level logging
+        use_umls: If True, enables UMLS tools for medical terminology
 
     Returns:
         The final state after the workflow completes, potentially with the
@@ -156,6 +249,16 @@ def run_agent_workflow(user_input: str, debug: bool = False):
 
     if debug:
         enable_debug_logging()  # Ensure this enables logging effectively
+
+    # Use a custom-configured graph if UMLS or search is requested; otherwise use the default
+    if use_umls or use_search:
+        workflow_graph = build_custom_graph(use_umls=use_umls, use_search=use_search)
+        logger.info(
+            "Using custom workflow (UMLS: %s, search: %s)", use_umls, use_search
+        )
+    else:
+        workflow_graph = graph
+        logger.info("Using standard workflow (offline, no UMLS)")
 
     initial_state = {
         # Constants
@@ -168,7 +271,8 @@ def run_agent_workflow(user_input: str, debug: bool = False):
         # Using dicts for now, assuming graph handles conversion if needed
         "messages": [{"role": "user", "content": user_input}],
         "deep_thinking_mode": True,
-        "search_before_planning": False,
+        # Only search when explicitly enabled
+        "search_before_planning": bool(use_search),
     }
 
     logger.info(
@@ -177,7 +281,7 @@ def run_agent_workflow(user_input: str, debug: bool = False):
     # Add verbose logging for the input message content itself if needed
     logger.debug(f"Initial messages state: {initial_state['messages']}")
 
-    result = graph.invoke(initial_state)
+    result = workflow_graph.invoke(initial_state)
     # Log the type and keys of the raw result to understand its structure
     logger.info(f"Raw workflow result type: {type(result)}")
     if isinstance(result, dict):

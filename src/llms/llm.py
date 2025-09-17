@@ -26,6 +26,7 @@ from src.config import (
     REASONING_AZURE_DEPLOYMENT,
 )
 from src.config.agents import LLMType
+import os
 
 
 def create_openai_llm(
@@ -216,6 +217,12 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatLiteLLM
         raise ValueError(f"Unknown LLM type: {llm_type}")
     if not isinstance(llm_conf, dict):
         raise ValueError(f"Invalid LLM Conf: {llm_type}")
+    # If using a local OpenAI-compatible endpoint (e.g., LM Studio) and api_key is missing,
+    # provide a dummy key to satisfy LiteLLM's provider requirement.
+    api_base = str(llm_conf.get("api_base", ""))
+    is_local = "localhost" in api_base or "127.0.0.1" in api_base
+    if is_local and not llm_conf.get("api_key"):
+        llm_conf["api_key"] = os.getenv("OPENAI_API_KEY", "dummy")
     return ChatLiteLLM(**llm_conf)
 
 

@@ -19,3 +19,7 @@ static/browser_history/*.gif
 conf.yaml
 
 .idea/
+
+/data/
+
+/data/

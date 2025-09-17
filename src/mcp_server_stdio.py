@@ -61,6 +61,11 @@ for handler in logging.root.handlers[:]:
 # Global flag for graceful shutdown
 shutdown_requested = False
 
+# Whether to respond using Content-Length framing (set dynamically when a framed
+# request is received). Defaults to False to preserve newline-delimited behavior
+# for simple CLI tests and backward compatibility.
+use_content_length_response = False
+
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
@@ -130,35 +135,115 @@ async def process_json_rpc_request(
 async def read_json_rpc_message() -> Optional[Dict[str, Any]]:
     """Read a JSON-RPC message from stdin."""
     try:
-        # Use a simpler approach - just read directly without timeout
-        # The timeout was causing buffering issues
-        line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+        global use_content_length_response
+        loop = asyncio.get_event_loop()
+
+        # Read the first line (bytes) which may be a Content-Length header or raw JSON
+        first_line_bytes = await loop.run_in_executor(None, sys.stdin.buffer.readline)
 
         # Check if we got EOF
-        if not line:
+        if not first_line_bytes:
             logger.info("Got EOF from stdin")
             return None
 
-        # Strip whitespace
-        line = line.strip()
+        first_line_stripped = first_line_bytes.strip().decode("utf-8", errors="ignore")
 
         # Skip empty lines
-        if not line:
+        if not first_line_stripped:
             logger.info("Skipping empty line")
             return {"skip": True}
 
         logger.info(
-            f"Received line: {line[:100]}..."
-            if len(line) > 100
-            else f"Received line: {line}"
+            f"Received line: {first_line_stripped[:100]}..."
+            if len(first_line_stripped) > 100
+            else f"Received line: {first_line_stripped}"
         )
 
-        # Parse the JSON message
+        # LSP-style framing: Content-Length header
+        if first_line_stripped.lower().startswith("content-length:"):
+            try:
+                _, value = first_line_stripped.split(":", 1)
+                content_length = int(value.strip())
+            except Exception as e:
+                logger.error(
+                    f"Invalid Content-Length header: {first_line_stripped} ({e})"
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                }
+
+            # Consume remaining headers until a blank line
+            while True:
+                header_line_bytes = await loop.run_in_executor(
+                    None, sys.stdin.buffer.readline
+                )
+                if header_line_bytes is None or header_line_bytes == b"":
+                    logger.info("Got EOF while reading headers")
+                    return None
+                if (
+                    header_line_bytes in (b"\r\n", b"\n")
+                    or header_line_bytes.strip() == b""
+                ):
+                    break
+
+            # Read the body of exactly content_length bytes
+            try:
+                body_bytes = await loop.run_in_executor(
+                    None, sys.stdin.buffer.read, content_length
+                )
+            except Exception as e:
+                logger.error(f"Failed to read body bytes: {e}")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                }
+
+            if not body_bytes or len(body_bytes) < content_length:
+                logger.error(
+                    f"Incomplete body read: expected {content_length}, got {0 if not body_bytes else len(body_bytes)}"
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                }
+
+            try:
+                body_text = body_bytes.decode("utf-8")
+            except Exception as e:
+                logger.error(f"Failed to decode body as UTF-8: {e}")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                }
+
+            try:
+                obj = json.loads(body_text)
+                # Mark that we should respond using Content-Length framing
+                use_content_length_response = True
+                return obj
+            except json.JSONDecodeError as e:
+                logger.error(
+                    f"Failed to parse JSON body: {e}, body: {body_text[:100]}..."
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                }
+
+        # Fallback: newline-delimited raw JSON
         try:
-            return json.loads(line)
+            obj = json.loads(first_line_stripped)
+            # For raw input, ensure we respond with raw newline JSON for compatibility
+            use_content_length_response = False
+            return obj
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON: {e}, line: {line}")
-            # Return a parse error response
+            logger.error(f"Failed to parse JSON: {e}, line: {first_line_stripped}")
             return {
                 "jsonrpc": "2.0",
                 "id": None,
@@ -173,16 +258,31 @@ async def read_json_rpc_message() -> Optional[Dict[str, Any]]:
 def write_json_rpc_message(message: Dict[str, Any]):
     """Write a JSON-RPC message to stdout."""
     try:
-        # Write the message as a single line
         json_str = json.dumps(message, separators=(",", ":"))
-        logger.info(
-            f"Writing response: {json_str[:200]}..."
-            if len(json_str) > 200
-            else f"Writing response: {json_str}"
-        )
-        sys.stdout.write(json_str + "\n")
-        sys.stdout.flush()
-        logger.info("Response written and flushed")
+
+        # If the client used Content-Length framing, respond in kind
+        if use_content_length_response:
+            body_bytes = json_str.encode("utf-8")
+            header = f"Content-Length: {len(body_bytes)}\r\n\r\n".encode("ascii")
+            logger.info(
+                f"Writing framed response (Content-Length {len(body_bytes)}): {json_str[:200]}..."
+                if len(json_str) > 200
+                else f"Writing framed response (Content-Length {len(body_bytes)}): {json_str}"
+            )
+            sys.stdout.buffer.write(header)
+            sys.stdout.buffer.write(body_bytes)
+            sys.stdout.flush()
+            logger.info("Framed response written and flushed")
+        else:
+            # Fallback: write newline-delimited JSON
+            logger.info(
+                f"Writing response: {json_str[:200]}..."
+                if len(json_str) > 200
+                else f"Writing response: {json_str}"
+            )
+            sys.stdout.write(json_str + "\n")
+            sys.stdout.flush()
+            logger.info("Response written and flushed")
     except Exception as e:
         logger.error(f"Error writing message: {e}")
 

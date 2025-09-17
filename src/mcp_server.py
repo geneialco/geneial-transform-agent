@@ -14,6 +14,7 @@ import uuid
 # Import the workflow function from the existing module
 from .workflow import run_agent_workflow
 from .cli import get_system_prompt, split_schema_and_output, validate_output
+from .utils.umls_client import get_umls_client, UMLSSearchResult
 
 # Load environment variables
 load_dotenv()
@@ -174,6 +175,120 @@ TOOLS = [
             "required": ["input_content"],
         },
     ),
+    Tool(
+        name="search_medical_terms",
+        description="Search for medical terms in UMLS ontologies (HPO, SNOMED CT, etc.)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "search_term": {
+                    "type": "string",
+                    "description": "Medical term to search for",
+                },
+                "ontology": {
+                    "type": "string",
+                    "description": "Ontology to search in (HPO, SNOMEDCT_US, NCI, etc.)",
+                    "default": "HPO",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return",
+                    "default": 10,
+                },
+            },
+            "required": ["search_term"],
+        },
+    ),
+    Tool(
+        name="validate_medical_terminology",
+        description="Validate medical terms against UMLS ontologies",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "terms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of medical terms to validate",
+                },
+                "ontology": {
+                    "type": "string",
+                    "description": "Ontology to validate against (HPO, SNOMEDCT_US, etc.)",
+                    "default": "HPO",
+                },
+            },
+            "required": ["terms"],
+        },
+    ),
+    Tool(
+        name="enhance_phenotype_data",
+        description="Enhance phenotype data with UMLS terminology annotations",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "phenotype_data": {
+                    "type": "object",
+                    "description": "Phenotype data to enhance with UMLS annotations",
+                },
+                "ontology": {
+                    "type": "string",
+                    "description": "Primary ontology for enhancement (HPO, SNOMED CT, etc.)",
+                    "default": "HPO",
+                },
+            },
+            "required": ["phenotype_data"],
+        },
+    ),
+    Tool(
+        name="search_cuis",
+        description="Search for CUIs (Concept Unique Identifiers) matching a medical term",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Medical term to search for CUIs",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of CUIs to return",
+                    "default": 10,
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="get_cui_info",
+        description="Get detailed information about a specific CUI",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "cui": {
+                    "type": "string",
+                    "description": "CUI identifier (e.g., C0011900)",
+                },
+            },
+            "required": ["cui"],
+        },
+    ),
+    Tool(
+        name="calculate_cui_similarity",
+        description="Calculate Wu-Palmer similarity between two CUIs",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "cui1": {
+                    "type": "string",
+                    "description": "First CUI identifier",
+                },
+                "cui2": {
+                    "type": "string",
+                    "description": "Second CUI identifier",
+                },
+            },
+            "required": ["cui1", "cui2"],
+        },
+    ),
 ]
 
 
@@ -205,6 +320,194 @@ async def handle_list_prompts(params: Optional[Dict[str, Any]]) -> Dict[str, Any
     return {"prompts": []}
 
 
+async def handle_umls_tool(tool_name: str, arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle UMLS-related tool calls."""
+    try:
+        umls_client = get_umls_client()
+        content = []
+
+        # Check if UMLS server is accessible
+        if not umls_client.health_check():
+            return CallToolResult(
+                content=[
+                    {
+                        "type": "text",
+                        "text": "❌ UMLS server is not accessible. Please ensure the UMLS server is running on the configured URL.",
+                    }
+                ],
+                isError=True,
+            )
+
+        if tool_name == "search_medical_terms":
+            search_term = arguments.get("search_term", "")
+            ontology = arguments.get("ontology", "HPO")
+            limit = arguments.get("limit", 10)
+
+            if not search_term:
+                raise ValueError("search_term is required")
+
+            results = umls_client.search_terms(search_term, ontology, limit)
+
+            if results:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"✅ Found {len(results)} medical terms for '{search_term}' in {ontology}:",
+                    }
+                )
+
+                for i, result in enumerate(results, 1):
+                    result_text = f"{i}. **{result.term}** ({result.code})"
+                    if result.description:
+                        result_text += f"\n   Description: {result.description}"
+                    content.append({"type": "text", "text": result_text})
+            else:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"ℹ️ No medical terms found for '{search_term}' in {ontology}",
+                    }
+                )
+
+        elif tool_name == "validate_medical_terminology":
+            terms = arguments.get("terms", [])
+            ontology = arguments.get("ontology", "HPO")
+
+            if not terms:
+                raise ValueError("terms list is required")
+
+            validation_results = umls_client.validate_terminology(terms, ontology)
+
+            valid_terms = [
+                term for term, is_valid in validation_results.items() if is_valid
+            ]
+            invalid_terms = [
+                term for term, is_valid in validation_results.items() if not is_valid
+            ]
+
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"📊 Validation results for {len(terms)} terms against {ontology}:",
+                }
+            )
+
+            if valid_terms:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"✅ Valid terms ({len(valid_terms)}): {', '.join(valid_terms)}",
+                    }
+                )
+
+            if invalid_terms:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"❌ Invalid terms ({len(invalid_terms)}): {', '.join(invalid_terms)}",
+                    }
+                )
+
+        elif tool_name == "enhance_phenotype_data":
+            phenotype_data = arguments.get("phenotype_data", {})
+            ontology = arguments.get("ontology", "HPO")
+
+            if not phenotype_data:
+                raise ValueError("phenotype_data is required")
+
+            enhanced_data = umls_client.enhance_phenotype_data(phenotype_data)
+
+            content.append(
+                {
+                    "type": "text",
+                    "text": "✅ Enhanced phenotype data with UMLS annotations:",
+                }
+            )
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"```json\n{json.dumps(enhanced_data, indent=2)}\n```",
+                }
+            )
+
+        elif tool_name == "search_cuis":
+            query = arguments.get("query", "")
+            limit = arguments.get("limit", 10)
+
+            if not query:
+                raise ValueError("query is required")
+
+            cuis = umls_client.search_cuis(query, limit)
+
+            if cuis:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"✅ Found {len(cuis)} CUIs for '{query}':",
+                    }
+                )
+                content.append({"type": "text", "text": ", ".join(cuis)})
+            else:
+                content.append(
+                    {"type": "text", "text": f"ℹ️ No CUIs found for '{query}'"}
+                )
+
+        elif tool_name == "get_cui_info":
+            cui = arguments.get("cui", "")
+
+            if not cui:
+                raise ValueError("cui is required")
+
+            cui_info = umls_client.get_cui_info(cui)
+
+            if cui_info:
+                info_text = f"**CUI:** {cui_info.cui}\n**Name:** {cui_info.name}"
+                if cui_info.description:
+                    info_text += f"\n**Description:** {cui_info.description}"
+                if cui_info.semantic_types:
+                    info_text += (
+                        f"\n**Semantic Types:** {', '.join(cui_info.semantic_types)}"
+                    )
+
+                content.append(
+                    {"type": "text", "text": f"✅ CUI Information:\n{info_text}"}
+                )
+            else:
+                content.append({"type": "text", "text": f"❌ CUI '{cui}' not found"})
+
+        elif tool_name == "calculate_cui_similarity":
+            cui1 = arguments.get("cui1", "")
+            cui2 = arguments.get("cui2", "")
+
+            if not cui1 or not cui2:
+                raise ValueError("Both cui1 and cui2 are required")
+
+            similarity = umls_client.calculate_wu_palmer_similarity(cui1, cui2)
+
+            if similarity is not None:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"✅ Wu-Palmer similarity between {cui1} and {cui2}: {similarity:.4f}",
+                    }
+                )
+            else:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"❌ Could not calculate similarity between {cui1} and {cui2}",
+                    }
+                )
+
+        return CallToolResult(content=content)
+
+    except Exception as e:
+        logger.error(f"Error handling UMLS tool {tool_name}: {str(e)}")
+        return CallToolResult(
+            content=[{"type": "text", "text": f"Error: {str(e)}"}], isError=True
+        )
+
+
 async def handle_call_tool(params: Optional[Dict[str, Any]]) -> CallToolResult:
     """Handle the tools/call method."""
     if not params or "name" not in params:
@@ -216,6 +519,17 @@ async def handle_call_tool(params: Optional[Dict[str, Any]]) -> CallToolResult:
     logger.info(f"Calling tool: {tool_name} with arguments: {arguments}")
 
     try:
+        # Handle UMLS-related tools separately
+        if tool_name in [
+            "search_medical_terms",
+            "validate_medical_terminology",
+            "enhance_phenotype_data",
+            "search_cuis",
+            "get_cui_info",
+            "calculate_cui_similarity",
+        ]:
+            return await handle_umls_tool(tool_name, arguments)
+
         # Map tool names to output formats
         format_mapping = {
             "transform_to_linkml": "linkml",
@@ -248,7 +562,9 @@ async def handle_call_tool(params: Optional[Dict[str, Any]]) -> CallToolResult:
 
         # Run the workflow
         # Run in offline mode by default; enable search only via explicit config (future extension)
-        result = run_agent_workflow(full_prompt, debug=debug, use_umls=False, use_search=False)
+        result = run_agent_workflow(
+            full_prompt, debug=debug, use_umls=False, use_search=False
+        )
 
         # Split result into schema and output
         schema_content, output_content = split_schema_and_output(result)

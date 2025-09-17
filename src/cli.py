@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Literal, Tuple, Union
 from .workflow import run_agent_workflow
+from .utils.umls_client import get_umls_client
 
 # Configure logging
 logging.basicConfig(
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 PHENOPACKET_TOOLS_JAR_PATH = "/Applications/phenopacket-tools-cli-1.0.0-RC3.jar"
 
 
-def get_system_prompt(output_format: str) -> str:
+def get_system_prompt(output_format: str, use_umls: bool = False) -> str:
     """Get the appropriate system prompt based on the output format."""
     base_prompt = """You are a helpful assistant that can process and transform content according to specified rules.
 Your task is to transform the input content in TOPMED format into the specified output format."""
@@ -192,7 +193,53 @@ Instructions for Phenopackets CSV format:
 - Do not include any other text before or after the SCHEMA or OUTPUT lines""",
     }
 
-    return base_prompt + format_specific_prompts.get(output_format, "")
+    prompt = base_prompt + format_specific_prompts.get(output_format, "")
+
+    # Add UMLS integration instructions if requested
+    if use_umls:
+        umls_instructions = """
+
+####################################################
+##  UMLS INTEGRATION INSTRUCTIONS
+####################################################
+
+When processing the data, you should identify and map clinical concepts using UMLS terminology:
+
+1. **Identify Clinical Concepts**: Look for medical terms, conditions, measurements, and phenotypes in the input data.
+
+2. **Clinical Concept Categories to Map**:
+   - Physical measurements (BMI, blood pressure, cholesterol levels)
+   - Medical conditions (diabetes, hypertension, asthma, COPD, etc.)
+   - Demographic information (age, sex, ethnicity)
+   - Behavioral factors (smoking status)
+   - Laboratory values and vital signs
+
+3. **UMLS Mapping Process**:
+   - For each clinical concept identified, find the appropriate UMLS CUI (Concept Unique Identifier)
+   - Use HPO (Human Phenotype Ontology) as the primary ontology for phenotypic features
+   - Use SNOMED CT for general medical concepts when HPO is not applicable
+   - Include both the UMLS code and the standardized term name
+
+4. **Integration in Output**:
+   - Add UMLS mappings as comments in the schema and output files
+   - For LinkML: Include UMLS codes as comments above relevant class and slot definitions
+   - For Phenopackets: Include UMLS annotations in the phenotypic features
+   - Create a mapping section that shows: Original Term → UMLS Code (Standardized Term)
+
+5. **Example UMLS Mapping Format**:
+   ```
+   # UMLS Mapping: BMI → C1305855 (Quetelet Index)
+   # UMLS Mapping: Hypertension → C0020538 (Hypertension)
+   # UMLS Mapping: Type 2 Diabetes → C0011860 (Type 2 diabetes mellitus)
+   ```
+
+6. **Documentation**: Include a comment section listing all UMLS mappings found during the transformation process.
+
+Please ensure that the UMLS mappings are comprehensive and accurate, covering all clinical concepts present in the input data.
+"""
+        prompt += umls_instructions
+
+    return prompt
 
 
 def load_input_file(file_path: str) -> str:
@@ -517,7 +564,9 @@ def validate_output(
     initial_full_prompt: str,
     debug: bool = False,
     max_retries: int = 10,
-) -> Tuple[str, str, bool, str]:
+    use_umls: bool = False,
+    use_search: bool = False,
+) -> Tuple[str, str, bool, str, Dict]:
     """
     Validate output content and potentially correct it using LLM.
 
@@ -530,7 +579,7 @@ def validate_output(
         max_retries: Maximum number of validation retry attempts
 
     Returns:
-        Tuple of (corrected_schema_content, corrected_output_content, validation_successful, validation_message)
+        Tuple of (corrected_schema_content, corrected_output_content, validation_successful, validation_message, validation_stats)
     """
     if debug:
         logger.setLevel(logging.DEBUG)
@@ -541,10 +590,20 @@ def validate_output(
     validation_successful = False
     validation_message = ""
 
+    # Initialize validation statistics
+    validation_stats = {
+        "initial_validation_success": False,
+        "total_retries": 0,
+        "final_validation_success": False,
+        "validation_attempts": 0,
+        "llm_correction_attempts": 0,
+    }
+
     if output_format == "linkml":
         validation_retry_delay = 2  # seconds
 
         for val_attempt in range(max_retries):
+            validation_stats["validation_attempts"] += 1
             logger.info(
                 "Starting LinkML validation attempt %d of %d.",
                 val_attempt + 1,
@@ -625,13 +684,19 @@ def validate_output(
                         )
                         logger.info(validation_message)
                         validation_successful = True
+                        validation_stats["final_validation_success"] = True
+                        if val_attempt == 0:
+                            validation_stats["initial_validation_success"] = True
                         break
                     else:
                         error_message = stderr if stderr else stdout
                         validation_message = f"LinkML validation attempt {val_attempt + 1} failed. Error:\n{error_message}"
                         logger.error(validation_message)
 
+                        validation_stats["total_retries"] = val_attempt + 1
+
                         if val_attempt < max_retries - 1:
+                            validation_stats["llm_correction_attempts"] += 1
                             logger.info("Attempting to fix LinkML using LLM...")
                             fix_prompt = (
                                 f"{initial_full_prompt}\n\n"
@@ -647,7 +712,12 @@ def validate_output(
                             logger.debug("LLM Fix Prompt (LinkML):\n%s", fix_prompt)
 
                             try:
-                                result = run_agent_workflow(fix_prompt, debug=debug)
+                                result = run_agent_workflow(
+                                    fix_prompt,
+                                    debug=debug,
+                                    use_umls=use_umls,
+                                    use_search=use_search,
+                                )
                                 logger.info(
                                     "LinkML correction attempt workflow completed."
                                 )
@@ -715,6 +785,7 @@ def validate_output(
         validation_retry_delay = 2  # seconds
 
         for val_attempt in range(max_retries):
+            validation_stats["validation_attempts"] += 1
             logger.info(
                 "Starting Phenopacket validation attempt %d of %d.",
                 val_attempt + 1,
@@ -779,6 +850,9 @@ def validate_output(
                     )
                     logger.info(validation_message)
                     validation_successful = True
+                    validation_stats["final_validation_success"] = True
+                    if val_attempt == 0:
+                        validation_stats["initial_validation_success"] = True
                     break
                 else:
                     error_detail = cli_message_output
@@ -791,7 +865,10 @@ def validate_output(
                     validation_message = f"Phenopacket validation attempt {val_attempt + 1} failed. Error:\n{error_message}"
                     logger.error(validation_message)
 
+                    validation_stats["total_retries"] = val_attempt + 1
+
                     if val_attempt < max_retries - 1:
+                        validation_stats["llm_correction_attempts"] += 1
                         logger.info("Attempting to fix Phenopacket using LLM...")
                         fix_prompt = (
                             f"{initial_full_prompt}\n\n"
@@ -807,7 +884,12 @@ def validate_output(
                         logger.debug("LLM Fix Prompt (Phenopacket):\n%s", fix_prompt)
 
                         try:
-                            result = run_agent_workflow(fix_prompt, debug=debug)
+                            result = run_agent_workflow(
+                                fix_prompt,
+                                debug=debug,
+                                use_umls=use_umls,
+                                use_search=use_search,
+                            )
                             logger.info(
                                 "Phenopacket correction attempt workflow completed."
                             )
@@ -878,6 +960,8 @@ def validate_output(
         # For formats that don't have validation implemented
         validation_successful = True
         validation_message = f"Validation not implemented for format: {output_format}"
+        validation_stats["final_validation_success"] = True
+        validation_stats["initial_validation_success"] = True
         logger.info(validation_message)
 
     return (
@@ -885,7 +969,182 @@ def validate_output(
         corrected_output_content,
         validation_successful,
         validation_message,
+        validation_stats,
     )
+
+
+def enhance_content_with_umls(
+    schema_content: str,
+    output_content: str,
+    output_format: str,
+    original_input: str,
+    debug: bool = False,
+) -> Tuple[str, str]:
+    """Enhance generated content with UMLS mappings."""
+    logger.info("Enhancing content with UMLS mappings...")
+
+    try:
+        # Check if UMLS server is accessible
+        umls_client = get_umls_client()
+        if not umls_client.health_check():
+            logger.warning("UMLS server is not accessible. Skipping UMLS enhancement.")
+            return schema_content, output_content
+
+        # Extract clinical concepts from the original input
+        clinical_concepts = extract_clinical_concepts(original_input)
+
+        # Get UMLS mappings
+        umls_mappings = {}
+        for concept in clinical_concepts:
+            logger.debug(f"Mapping clinical concept: {concept}")
+
+            # Search in HPO first
+            hpo_results = umls_client.search_terms(concept, "HPO", limit=1)
+            if hpo_results:
+                umls_mappings[concept] = {
+                    "code": hpo_results[0].code,
+                    "term": hpo_results[0].term,
+                    "ontology": "HPO",
+                }
+            else:
+                # Try SNOMED CT as fallback
+                snomed_results = umls_client.search_terms(
+                    concept, "SNOMEDCT_US", limit=1
+                )
+                if snomed_results:
+                    umls_mappings[concept] = {
+                        "code": snomed_results[0].code,
+                        "term": snomed_results[0].term,
+                        "ontology": "SNOMEDCT_US",
+                    }
+
+        # Add UMLS mappings to content
+        enhanced_schema = add_umls_mappings_to_content(
+            schema_content, umls_mappings, output_format, "schema"
+        )
+        enhanced_output = add_umls_mappings_to_content(
+            output_content, umls_mappings, output_format, "output"
+        )
+
+        logger.info(
+            f"Successfully mapped {len(umls_mappings)} clinical concepts using UMLS"
+        )
+
+        return enhanced_schema, enhanced_output
+
+    except Exception as e:
+        logger.error(f"Error during UMLS enhancement: {e}")
+        logger.warning("Continuing without UMLS enhancement")
+        return schema_content, output_content
+
+
+def extract_clinical_concepts(input_content: str) -> list:
+    """Extract clinical concepts from input content."""
+    # Common clinical terms that are likely to appear in medical data
+    clinical_terms = [
+        "BMI",
+        "blood pressure",
+        "systolic",
+        "diastolic",
+        "cholesterol",
+        "age",
+        "sex",
+        "gender",
+        "smoking",
+        "diabetes",
+        "hypertension",
+        "asthma",
+        "COPD",
+        "coronary artery disease",
+        "hyperlipidemia",
+        "obesity",
+        "heart disease",
+        "cancer",
+        "stroke",
+        "myocardial infarction",
+        "chronic kidney disease",
+        "liver disease",
+        "depression",
+        "anxiety",
+        "sleep apnea",
+    ]
+
+    found_concepts = []
+    input_lower = input_content.lower()
+
+    # Look for exact matches
+    for term in clinical_terms:
+        if term.lower() in input_lower:
+            found_concepts.append(term)
+
+    # Look for common medical history patterns
+    if "medical history" in input_lower or "medicalhistory" in input_lower:
+        # Extract conditions from medical history fields
+        import re
+
+        history_patterns = [
+            r"coronary artery disease",
+            r"type 2 diabetes",
+            r"diabetes mellitus",
+            r"hypertension",
+            r"hyperlipidemia",
+            r"asthma",
+            r"copd",
+            r"chronic obstructive pulmonary disease",
+        ]
+
+        for pattern in history_patterns:
+            if re.search(pattern, input_lower):
+                found_concepts.append(pattern.replace(r"\s+", " "))
+
+    # Remove duplicates and return
+    return list(set(found_concepts))
+
+
+def add_umls_mappings_to_content(
+    content: str, mappings: dict, output_format: str, content_type: str
+) -> str:
+    """Add UMLS mappings to content as comments."""
+    if not mappings:
+        return content
+
+    # Create UMLS mapping comment section
+    mapping_comments = []
+    mapping_comments.append("# UMLS Concept Mappings")
+    mapping_comments.append(
+        "# Generated automatically from clinical concepts in the input data"
+    )
+    mapping_comments.append("#")
+
+    for original_term, mapping in mappings.items():
+        comment = f"# {original_term} → {mapping['code']} ({mapping['term']}) [{mapping['ontology']}]"
+        mapping_comments.append(comment)
+
+    mapping_comments.append("#")
+
+    # Add mappings at the top of the content
+    mapping_section = "\n".join(mapping_comments) + "\n\n"
+
+    # For LinkML, add to both schema and output
+    if output_format == "linkml":
+        return mapping_section + content
+
+    # For Phenopackets, add to schema only to avoid breaking JSON structure
+    elif output_format == "phenopackets-json":
+        if content_type == "schema":
+            return mapping_section + content
+        else:
+            # For JSON output, we can't add comments, so just return original
+            return content
+
+    # For CSV, add as header comments
+    elif output_format == "phenopackets-csv":
+        if content_type == "schema":
+            return mapping_section + content
+        else:
+            return mapping_section + content
+
+    return content
 
 
 def process_file(
@@ -897,6 +1156,9 @@ def process_file(
     debug: bool = False,
     validate: bool = False,
     max_retries: int = 10,
+    output_stats: bool = False,
+    use_umls: bool = False,
+    use_search: bool = False,
 ) -> None:
     """Process input file using the workflow and save results."""
     if debug:
@@ -911,7 +1173,7 @@ def process_file(
     logger.info("Loaded input file: %s", input_path)
 
     # Get the appropriate system prompt
-    system_prompt = get_system_prompt(output_format)
+    system_prompt = get_system_prompt(output_format, use_umls)
 
     # Combine system prompt with user prompt and input content
     initial_full_prompt = f"{system_prompt}\n\n{user_prompt}\n\n{input_content}"
@@ -933,7 +1195,9 @@ def process_file(
             )
 
             # Run the workflow
-            result = run_agent_workflow(current_prompt, debug=debug)
+            result = run_agent_workflow(
+                current_prompt, debug=debug, use_umls=use_umls, use_search=use_search
+            )
             logger.info("Workflow completed, processing result")
 
             # Log the raw result for debugging
@@ -1024,6 +1288,14 @@ def process_file(
                     f"Failed initial generation after {max_retries} attempts. Last error: {last_initial_error}"
                 )
 
+    # --- UMLS Enhancement (if requested) ---
+    if use_umls:
+        logger.info("Performing UMLS enhancement...")
+        schema_content, output_content = enhance_content_with_umls(
+            schema_content, output_content, output_format, input_content, debug
+        )
+        logger.info("UMLS enhancement completed")
+
     # --- Validation and Correction (if requested) ---
     if validate:
         logger.info("Running validation...")
@@ -1032,6 +1304,7 @@ def process_file(
             corrected_output_content,
             validation_successful,
             validation_message,
+            validation_stats,
         ) = validate_output(
             schema_content,
             output_content,
@@ -1039,6 +1312,8 @@ def process_file(
             initial_full_prompt,
             debug,
             max_retries,
+            use_umls,
+            use_search,
         )
 
         if not validation_successful:
@@ -1048,8 +1323,25 @@ def process_file(
             # Use the potentially corrected content
             schema_content = corrected_schema_content
             output_content = corrected_output_content
+
+        # Output benchmark statistics if requested
+        if output_stats:
+            stats_json = json.dumps(validation_stats)
+            print(f"BENCHMARK_STATS:{stats_json}")
     else:
         logger.info("Validation not requested, skipping validation step.")
+
+        # Output benchmark statistics if requested (no validation case)
+        if output_stats:
+            no_validation_stats = {
+                "initial_validation_success": True,  # No validation means "success"
+                "total_retries": 0,
+                "final_validation_success": True,
+                "validation_attempts": 0,
+                "llm_correction_attempts": 0,
+            }
+            stats_json = json.dumps(no_validation_stats)
+            print(f"BENCHMARK_STATS:{stats_json}")
 
     # Save the final content to files
     if schema_content:
@@ -1097,6 +1389,24 @@ def main():
         action="store_true",
         help="Run validation on the generated output (currently only LinkML supported)",
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Output benchmark statistics for retry tracking",
+    )
+    parser.add_argument(
+        "--use-umls",
+        action="store_true",
+        dest="use_umls",
+        help="Enable UMLS integration for clinical concept mapping",
+    )
+    parser.add_argument(
+        "--use-search",
+        "-use-search",
+        action="store_true",
+        dest="use_search",
+        help="Enable Tavily search. By default, search is disabled and the workflow stays offline.",
+    )
 
     args = parser.parse_args()
 
@@ -1116,6 +1426,9 @@ def main():
             args.debug,
             args.validate,
             args.max_retries,
+            args.stats,
+            args.use_umls,
+            args.use_search,
         )
         print(f"Successfully processed {args.input}")
         print(f"Schema saved to: {args.schema}")

@@ -7,7 +7,9 @@
       "env": {
         "PYTHONPATH": "put your path to langmanus-transform here",
         "MAX_RETRIES": "10",
-        "PHENOPACKET_TOOLS_JAR_PATH": "put your path to phenopacket-tools-cli-1.0.0-RC3.jar here"
+        "PHENOPACKET_TOOLS_JAR_PATH": "put your path to phenopacket-tools-cli-1.0.0-RC3.jar here",
+        "UMLS_API_URL": "http://localhost:8000",
+        "PATH": "/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin"
       }
     }
   }
