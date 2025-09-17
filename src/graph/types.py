@@ -26,6 +26,7 @@ class State(MessagesState):
     full_plan: str
     deep_thinking_mode: bool
     search_before_planning: bool
+    use_streaming: bool
     # Loop control
     loop_counter: int
     last_next: str

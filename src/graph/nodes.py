@@ -161,10 +161,15 @@ def planner_node(state: State) -> Command[Literal["supervisor", "__end__"]]:
             logger.error(
                 f"Tavily search returned malformed response: {searched_content}"
             )
-    stream = llm.stream(messages)
-    full_response = ""
-    for chunk in stream:
-        full_response += chunk.content
+    use_streaming = state.get("use_streaming", True)
+    if use_streaming:
+        stream = llm.stream(messages)
+        full_response = ""
+        for chunk in stream:
+            full_response += chunk.content
+    else:
+        response_msg = llm.invoke(messages)
+        full_response = getattr(response_msg, "content", "") or ""
     logger.debug(f"Current state messages: {state['messages']}")
     logger.debug(f"Planner response: {full_response}")
 

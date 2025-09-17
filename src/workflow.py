@@ -232,6 +232,7 @@ def run_agent_workflow(
     debug: bool = False,
     use_umls: bool = False,
     use_search: bool = False,
+    use_streaming: bool = True,
 ):
     """Run the agent workflow with the given user input.
 
@@ -273,6 +274,8 @@ def run_agent_workflow(
         "deep_thinking_mode": True,
         # Only search when explicitly enabled
         "search_before_planning": bool(use_search),
+        # Streaming control
+        "use_streaming": bool(use_streaming),
         # Loop control defaults
         "loop_counter": 0,
         "last_next": None,

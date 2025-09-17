@@ -1159,6 +1159,7 @@ def process_file(
     output_stats: bool = False,
     use_umls: bool = False,
     use_search: bool = False,
+    no_stream: bool = False,
 ) -> None:
     """Process input file using the workflow and save results."""
     if debug:
@@ -1196,7 +1197,11 @@ def process_file(
 
             # Run the workflow
             result = run_agent_workflow(
-                current_prompt, debug=debug, use_umls=use_umls, use_search=use_search
+                current_prompt,
+                debug=debug,
+                use_umls=use_umls,
+                use_search=use_search,
+                use_streaming=not no_stream,
             )
             logger.info("Workflow completed, processing result")
 
@@ -1407,6 +1412,12 @@ def main():
         dest="use_search",
         help="Enable Tavily search. By default, search is disabled and the workflow stays offline.",
     )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        dest="no_stream",
+        help="Disable streaming calls to the LLM (use non-streaming invoke).",
+    )
 
     args = parser.parse_args()
 
@@ -1429,6 +1440,7 @@ def main():
             args.stats,
             args.use_umls,
             args.use_search,
+            no_stream=args.no_stream,
         )
         print(f"Successfully processed {args.input}")
         print(f"Schema saved to: {args.schema}")
