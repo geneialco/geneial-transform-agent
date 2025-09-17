@@ -273,6 +273,9 @@ def run_agent_workflow(
         "deep_thinking_mode": True,
         # Only search when explicitly enabled
         "search_before_planning": bool(use_search),
+        # Loop control defaults
+        "loop_counter": 0,
+        "last_next": None,
     }
 
     logger.info(
@@ -281,7 +284,7 @@ def run_agent_workflow(
     # Add verbose logging for the input message content itself if needed
     logger.debug(f"Initial messages state: {initial_state['messages']}")
 
-    result = workflow_graph.invoke(initial_state)
+    result = workflow_graph.invoke(initial_state, config={"recursion_limit": 60})
     # Log the type and keys of the raw result to understand its structure
     logger.info(f"Raw workflow result type: {type(result)}")
     if isinstance(result, dict):

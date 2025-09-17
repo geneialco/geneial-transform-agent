@@ -93,6 +93,9 @@ def browser_node(state: State) -> Command[Literal["supervisor"]]:
 def supervisor_node(state: State) -> Command[Literal[*TEAM_MEMBERS, "__end__"]]:
     """Supervisor node that decides which agent should act next."""
     logger.info("Supervisor evaluating next action")
+    # Loop breaker: if the model keeps picking the same next step too many times, end gracefully
+    loop_counter = state.get("loop_counter", 0)
+    last_next = state.get("last_next")
     messages = apply_prompt_template("supervisor", state)
     # preprocess messages to make supervisor execute better.
     messages = deepcopy(messages)
@@ -105,6 +108,16 @@ def supervisor_node(state: State) -> Command[Literal[*TEAM_MEMBERS, "__end__"]]:
         .invoke(messages)
     )
     goto = response["next"]
+    if last_next == goto:
+        loop_counter += 1
+    else:
+        loop_counter = 0
+    if loop_counter >= 5:
+        logger.warning(
+            "Loop breaker triggered in supervisor: repeated '%s' 5 times; finishing.",
+            goto,
+        )
+        goto = "__end__"
     logger.debug(f"Current state messages: {state['messages']}")
     logger.debug(f"Supervisor response: {response}")
 
@@ -114,7 +127,10 @@ def supervisor_node(state: State) -> Command[Literal[*TEAM_MEMBERS, "__end__"]]:
     else:
         logger.info(f"Supervisor delegating to: {goto}")
 
-    return Command(goto=goto, update={"next": goto})
+    return Command(
+        goto=goto,
+        update={"next": goto, "loop_counter": loop_counter, "last_next": goto},
+    )
 
 
 def planner_node(state: State) -> Command[Literal["supervisor", "__end__"]]:
